@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Админка</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body>
+    <header>
+        <a href="/" class="back-btn">← На главную</a>
+        <h1>Панель управления</h1>
+        <p>Управление базой законодательства</p>
+    </header>
+
+    <main class="admin-main">
+        <div class="admin-grid">
+            <div class="admin-form-section">
+                <h2>Добавить закон</h2>
+                <div class="admin-form">
+                    <input type="text" id="f-number" placeholder="Номер (например 152-ФЗ)">
+                    <input type="text" id="f-title" placeholder="Название закона">
+                    <textarea id="f-description" placeholder="Краткое описание"></textarea>
+                    <select id="f-category">
+                        <option value="">Выберите категорию</option>
+                        <option value="Персональные данные">Персональные данные</option>
+                        <option value="Критическая инфраструктура">Критическая инфраструктура</option>
+                        <option value="Информационная безопасность">Информационная безопасность</option>
+                        <option value="Коммерческая тайна">Коммерческая тайна</option>
+                    </select>
+                    <input type="number" id="f-year" placeholder="Год принятия">
+                    <button onclick="addLaw()">Добавить закон</button>
+                </div>
+            </div>
+
+            <div class="admin-list-section">
+                <h2>Все законы <span id="laws-count"></span></h2>
+                <div id="admin-laws-list"></div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        function loadLaws() {
+            fetch('/api/laws')
+                .then(res => res.json())
+                .then(laws => {
+                    document.getElementById('laws-count').textContent = '(' + laws.length + ')';
+                    document.getElementById('admin-laws-list').innerHTML = laws.map(law => `
+                        <div class="admin-law-item">
+                            <div class="admin-law-info">
+                                <span class="law-number">${law.number}</span>
+                                <span class="admin-law-title">${law.title}</span>
+                            </div>
+                            <button class="delete-btn" onclick="deleteLaw(${law.id})">Удалить</button>
+                        </div>
+                    `).join('');
+                });
+        }
+
+        function addLaw() {
+            const data = {
+                number: document.getElementById('f-number').value,
+                title: document.getElementById('f-title').value,
+                description: document.getElementById('f-description').value,
+                category: document.getElementById('f-category').value,
+                year: parseInt(document.getElementById('f-year').value)
+            };
+
+            if (!data.number || !data.title || !data.category || !data.year) {
+                alert('Заполните все поля');
+                return;
+            }
+
+            fetch('/api/laws', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            })
+            .then(res => res.json())
+            .then(() => {
+                document.getElementById('f-number').value = '';
+                document.getElementById('f-title').value = '';
+                document.getElementById('f-description').value = '';
+                document.getElementById('f-category').value = '';
+                document.getElementById('f-year').value = '';
+                loadLaws();
+            });
+        }
+
+        function deleteLaw(id) {
+            if (!confirm('Удалить этот закон?')) return;
+            fetch('/api/laws/' + id, { method: 'DELETE' })
+                .then(() => loadLaws());
+        }
+
+        loadLaws();
+    </script>
+</body>
+</html>

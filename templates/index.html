@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Законодательство в сфере ИБ</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <h1>Информационно-справочная система</h1>
+        <p>Законодательство в области информационной безопасности для бизнеса</p>
+        <div class="search-wrap">
+    <input type="text" id="search" placeholder="Поиск по законам...">
+</div>
+    </header>
+
+    <main>
+        <div class="filters">
+            <button class="filter-btn active" onclick="setFilter('all', this)">Все</button>
+            <button class="filter-btn" onclick="setFilter('Персональные данные', this)">Персональные данные</button>
+            <button class="filter-btn" onclick="setFilter('Критическая инфраструктура', this)">Критическая инфраструктура</button>
+            <button class="filter-btn" onclick="setFilter('Информационная безопасность', this)">Информационная безопасность</button>
+            <button class="filter-btn" onclick="setFilter('Коммерческая тайна', this)">Коммерческая тайна</button>
+        </div>
+
+        <div id="laws-container"></div>
+    </main>
+
+    <script>
+        let allLaws = [];
+        let currentFilter = 'all';
+
+        function loadLaws() {
+            fetch('/api/laws')
+                .then(res => res.json())
+                .then(laws => {
+                    allLaws = laws;
+                    renderLaws();
+                });
+        }
+
+        function renderLaws() {
+            const query = document.getElementById('search').value.toLowerCase();
+            let filtered = allLaws;
+
+            if (currentFilter !== 'all') {
+                filtered = filtered.filter(l => l.category === currentFilter);
+            }
+
+            if (query) {
+                filtered = filtered.filter(l =>
+                    l.title.toLowerCase().includes(query) ||
+                    l.number.toLowerCase().includes(query) ||
+                    l.description.toLowerCase().includes(query)
+                );
+            }
+
+            const container = document.getElementById('laws-container');
+
+            if (filtered.length === 0) {
+                container.innerHTML = '<p class="no-results">Ничего не найдено</p>';
+                return;
+            }
+
+            container.innerHTML = filtered.map(law => `
+                <div class="law-card" onclick="window.location='/law/${law.id}'">
+                    <div class="law-card-top"><span class="law-number">${law.number}</span><span class="law-year">${law.year}</span></div>
+                    <h2>${law.title}</h2>
+                    <p>${law.description}</p>
+                    <span class="law-category">${law.category}</span>
+                </div>
+            `).join('');
+        }
+
+        function setFilter(category, btn) {
+            currentFilter = category;
+            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            renderLaws();
+        }
+
+        document.getElementById('search').addEventListener('input', renderLaws);
+
+        loadLaws();
+    </script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Закон</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <a href="/" class="back-btn">← Назад</a>
+        <h1 id="law-title">Загрузка...</h1>
+        <p id="law-number"></p>
+    </header>
+
+    <main class="law-detail">
+        <div class="law-info">
+            <div class="info-card">
+                <h3>Описание</h3>
+                <p id="law-description"></p>
+            </div>
+            <div class="info-card">
+                <h3>Категория</h3>
+                <p id="law-category"></p>
+            </div>
+            <div class="info-card">
+                <h3>Год принятия</h3>
+                <p id="law-year"></p>
+            </div>
+        </div>
+
+        <div class="articles-section">
+            <h2>Статьи</h2>
+            <div id="articles-container">
+                <p style="color:#999">Статьи не добавлены</p>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const lawId = {{ law_id }};
+
+        fetch(`/api/laws/${lawId}`)
+            .then(res => res.json())
+            .then(law => {
+                document.title = law.number + ' — ' + law.title;
+                document.getElementById('law-title').textContent = law.title;
+                document.getElementById('law-number').textContent = law.number;
+                document.getElementById('law-description').textContent = law.description;
+                document.getElementById('law-category').textContent = law.category;
+                document.getElementById('law-year').textContent = law.year;
+
+                if (law.articles && law.articles.length > 0) {
+                    document.getElementById('articles-container').innerHTML =
+                        law.articles.map(a => `
+                            <div class="article-card">
+                                <h4>Статья ${a.number}. ${a.title}</h4>
+                                <p>${a.content}</p>
+                            </div>
+                        `).join('');
+                }
+            });
+    </script>
+</body>
+</html>
