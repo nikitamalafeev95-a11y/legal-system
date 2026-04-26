@@ -11,8 +11,8 @@
         <h1>Информационно-справочная система</h1>
         <p>Законодательство в области информационной безопасности для бизнеса</p>
         <div class="search-wrap">
-    <input type="text" id="search" placeholder="Поиск по законам...">
-</div>
+            <input type="text" id="search" placeholder="Поиск по законам...">
+        </div>
     </header>
 
     <main>
@@ -24,15 +24,22 @@
             <button class="filter-btn" onclick="setFilter('Коммерческая тайна', this)">Коммерческая тайна</button>
         </div>
 
+        <div class="sort-bar">
+            <span>Сортировка:</span>
+            <button class="sort-btn active" onclick="setSort('default', this)">По умолчанию</button>
+            <button class="sort-btn" onclick="setSort('popular', this)">По популярности</button>
+        </div>
+
         <div id="laws-container"></div>
     </main>
 
     <script>
         let allLaws = [];
         let currentFilter = 'all';
+        let currentSort = 'default';
 
         function loadLaws() {
-            fetch('/api/laws')
+            fetch('/api/laws?sort=' + currentSort)
                 .then(res => res.json())
                 .then(laws => {
                     allLaws = laws;
@@ -65,10 +72,16 @@
 
             container.innerHTML = filtered.map(law => `
                 <div class="law-card" onclick="window.location='/law/${law.id}'">
-                    <div class="law-card-top"><span class="law-number">${law.number}</span><span class="law-year">${law.year}</span></div>
+                    <div class="law-card-top">
+                        <span class="law-number">${law.number}</span>
+                        <span class="law-year">${law.year}</span>
+                    </div>
                     <h2>${law.title}</h2>
                     <p>${law.description}</p>
-                    <span class="law-category">${law.category}</span>
+                    <div class="law-card-bottom">
+                        <span class="law-category">${law.category}</span>
+                        <span class="law-views">👁 ${law.views || 0}</span>
+                    </div>
                 </div>
             `).join('');
         }
@@ -78,6 +91,13 @@
             document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             renderLaws();
+        }
+
+        function setSort(sort, btn) {
+            currentSort = sort;
+            document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            loadLaws();
         }
 
         document.getElementById('search').addEventListener('input', renderLaws);

@@ -4,6 +4,7 @@ import sqlite3
 app = Flask(__name__)
 app.secret_key = 'super_secret_fixed_key_diploma_2024'
 ADMIN_PASSWORD = 'admin123'
+
 def get_db():
     conn = sqlite3.connect('laws.db')
     conn.row_factory = sqlite3.Row
@@ -36,13 +37,19 @@ def logout():
 @app.route('/api/laws')
 def get_laws():
     conn = get_db()
-    laws = conn.execute('SELECT * FROM laws').fetchall()
+    sort = request.args.get('sort', 'default')
+    if sort == 'popular':
+        laws = conn.execute('SELECT * FROM laws ORDER BY views DESC').fetchall()
+    else:
+        laws = conn.execute('SELECT * FROM laws').fetchall()
     conn.close()
     return jsonify([dict(row) for row in laws])
 
 @app.route('/api/laws/<int:id>')
 def get_law(id):
     conn = get_db()
+    conn.execute('UPDATE laws SET views = views + 1 WHERE id = ?', (id,))
+    conn.commit()
     law = conn.execute('SELECT * FROM laws WHERE id = ?', (id,)).fetchone()
     articles = conn.execute('SELECT * FROM articles WHERE law_id = ?', (id,)).fetchall()
     conn.close()
