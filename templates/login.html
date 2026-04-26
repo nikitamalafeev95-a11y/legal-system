@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Вход в админку</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <style>
+        .login-wrap {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #f0f2f5;
+        }
+        .login-box {
+            background: white;
+            border-radius: 14px;
+            padding: 40px;
+            width: 360px;
+            border: 1.5px solid #ebebeb;
+        }
+        .login-box h2 {
+            font-size: 20px;
+            color: #0f2544;
+            margin-bottom: 24px;
+            font-weight: 700;
+        }
+        .login-box input {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1.5px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            outline: none;
+            margin-bottom: 12px;
+        }
+        .login-box input:focus {
+            border-color: #1a3a5c;
+        }
+        .login-box button {
+            width: 100%;
+            background: #0f2544;
+            color: white;
+            border: none;
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .login-box button:hover {
+            background: #1a3a5c;
+        }
+        .error {
+            color: #c0392b;
+            font-size: 13px;
+            margin-bottom: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-wrap">
+        <div class="login-box">
+            <h2>Вход в панель управления</h2>
+            {% if error %}
+                <p class="error">{{ error }}</p>
+            {% endif %}
+            <form method="POST">
+                <input type="password" name="password" placeholder="Введите пароль" autofocus>
+                <button type="submit">Войти</button>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
