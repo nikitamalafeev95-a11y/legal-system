@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Задать вопрос</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <a href="/" class="back-btn">← Назад</a>
+        <h1>Сервис ответов на вопросы</h1>
+        <p>Задайте вопрос — система найдёт подходящие статьи законов</p>
+    </header>
+
+    <main class="ask-main">
+        <div class="ask-form">
+            <input type="text" id="question" placeholder="Например: как защитить персональные данные сотрудников?">
+            <button onclick="askQuestion()">Найти ответ</button>
+        </div>
+
+        <div id="ask-results"></div>
+    </main>
+
+    <script>
+        function askQuestion() {
+            const question = document.getElementById('question').value.trim();
+            if (!question) return;
+
+            const resultsDiv = document.getElementById('ask-results');
+            resultsDiv.innerHTML = '<p class="loading">Ищем ответ...</p>';
+
+            fetch('/api/ask', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({question: question})
+            })
+            .then(res => res.json())
+            .then(results => {
+                if (results.length === 0) {
+                    resultsDiv.innerHTML = '<p class="no-results">Ничего не найдено. Попробуйте другие ключевые слова.</p>';
+                    return;
+                }
+
+                resultsDiv.innerHTML = `
+                    <h2 class="results-title">Найдено ${results.length} релевантных статей:</h2>
+                    ${results.map(r => `
+                        <div class="result-card" onclick="window.location='/law/${r.law_id}'">
+                            <div class="result-header">
+                                <span class="law-number">${r.law_number}</span>
+                                <span class="result-law-title">${r.law_title}</span>
+                            </div>
+                            <h4>Статья ${r.number}. ${r.title}</h4>
+                            <p>${r.content}</p>
+                            <span class="result-link">Перейти к закону →</span>
+                        </div>
+                    `).join('')}
+                `;
+            });
+        }
+
+        document.getElementById('question').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') askQuestion();
+        });
+    </script>
+</body>
+</html>

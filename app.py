@@ -91,5 +91,34 @@ def search():
     conn.close()
     return jsonify([dict(row) for row in laws])
 
+@app.route('/ask')
+def ask():
+    return render_template('ask.html')
+
+@app.route('/api/ask', methods=['POST'])
+def api_ask():
+    data = request.json
+    question = data.get('question', '').lower()
+    
+    keywords = [w for w in question.split() if len(w) > 3]
+    
+    conn = get_db()
+    results = []
+    
+    for keyword in keywords:
+        articles = conn.execute('''
+            SELECT a.*, l.title as law_title, l.number as law_number
+            FROM articles a
+            JOIN laws l ON a.law_id = l.id
+            WHERE LOWER(a.content) LIKE ? OR LOWER(a.title) LIKE ?
+        ''', (f'%{keyword}%', f'%{keyword}%')).fetchall()
+        
+        for article in articles:
+            article_dict = dict(article)
+            if not any(r['id'] == article_dict['id'] for r in results):
+                results.append(article_dict)
+    
+    conn.close()
+    return jsonify(results[:5])
 if __name__ == '__main__':
     app.run(debug=True)

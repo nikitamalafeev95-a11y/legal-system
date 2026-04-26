@@ -297,3 +297,103 @@ main {
     font-size: 12px;
     color: #aaa;
 }
+.ask-main {
+    padding: 30px 60px 60px;
+}
+
+.ask-form {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 30px;
+    max-width: 700px;
+}
+
+.ask-form input {
+    flex: 1;
+    padding: 14px 18px;
+    border: 1.5px solid #e0e0e0;
+    border-radius: 10px;
+    font-size: 15px;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+.ask-form input:focus {
+    border-color: #1a3a5c;
+}
+
+.ask-form button {
+    background: #0f2544;
+    color: white;
+    border: none;
+    padding: 14px 24px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.2s;
+}
+
+.ask-form button:hover {
+    background: #1a3a5c;
+}
+
+.results-title {
+    font-size: 16px;
+    color: #0f2544;
+    margin-bottom: 16px;
+    font-weight: 600;
+}
+
+.result-card {
+    background: white;
+    border-radius: 12px;
+    padding: 24px;
+    border: 1.5px solid #ebebeb;
+    margin-bottom: 14px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.result-card:hover {
+    border-color: #1a3a5c;
+    box-shadow: 0 4px 16px rgba(26,58,92,0.1);
+}
+
+.result-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.result-law-title {
+    font-size: 13px;
+    color: #666;
+}
+
+.result-card h4 {
+    font-size: 15px;
+    color: #0f2544;
+    margin-bottom: 8px;
+    font-weight: 600;
+}
+
+.result-card p {
+    font-size: 13px;
+    color: #555;
+    line-height: 1.7;
+    margin-bottom: 12px;
+}
+
+.result-link {
+    font-size: 13px;
+    color: #1a3a5c;
+    font-weight: 500;
+}
+
+.loading {
+    color: #999;
+    font-size: 15px;
+}
