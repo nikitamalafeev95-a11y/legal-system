@@ -2,7 +2,8 @@ from flask import Flask, jsonify, render_template, request, session, redirect, u
 import sqlite3
 
 app = Flask(__name__)
-
+app.secret_key = 'super_secret_fixed_key_diploma_2024'
+ADMIN_PASSWORD = 'admin123'
 def get_db():
     conn = sqlite3.connect('laws.db')
     conn.row_factory = sqlite3.Row
@@ -16,9 +17,21 @@ def index():
 def law(id):
     return render_template('law.html', law_id=id)
 
-@app.route('/admin')
+@app.route('/admin', methods=['GET', 'POST'])
 def admin():
+    if request.method == 'POST':
+        if request.form.get('password') == ADMIN_PASSWORD:
+            session['admin'] = True
+            return redirect(url_for('admin'))
+        return render_template('login.html', error='Неверный пароль')
+    if not session.get('admin'):
+        return render_template('login.html', error=None)
     return render_template('admin.html')
+
+@app.route('/admin/logout')
+def logout():
+    session.pop('admin', None)
+    return redirect('/')
 
 @app.route('/api/laws')
 def get_laws():
