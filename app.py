@@ -99,14 +99,16 @@ def ask():
 def api_ask():
     data = request.json
     question = data.get('question', '').lower()
-    keywords = [w for w in question.split() if len(w) > 3]
+    keywords = [w for w in question.split() if len(w) > 2]
 
     conn = get_db()
     results = []
+    matched_laws = []
 
     for keyword in keywords:
+        # Ищем в статьях
         articles = conn.execute('''
-            SELECT a.*, l.title as law_title, l.number as law_number
+            SELECT a.*, l.title as law_title, l.number as law_number, l.description as law_desc
             FROM articles a
             JOIN laws l ON a.law_id = l.id
             WHERE LOWER(a.content) LIKE ? OR LOWER(a.title) LIKE ?
@@ -117,15 +119,46 @@ def api_ask():
             if not any(r['id'] == article_dict['id'] for r in results):
                 results.append(article_dict)
 
+        # Ищем в самих законах
+        laws = conn.execute('''
+            SELECT * FROM laws
+            WHERE LOWER(title) LIKE ? OR LOWER(description) LIKE ? OR LOWER(number) LIKE ?
+        ''', (f'%{keyword}%', f'%{keyword}%', f'%{keyword}%')).fetchall()
+
+        for law in laws:
+            law_dict = dict(law)
+            if not any(l['id'] == law_dict['id'] for l in matched_laws):
+                matched_laws.append(law_dict)
+
+                # Добавляем статьи этого закона в результаты
+                law_articles = conn.execute('''
+                    SELECT a.*, l.title as law_title, l.number as law_number, l.description as law_desc
+                    FROM articles a
+                    JOIN laws l ON a.law_id = l.id
+                    WHERE a.law_id = ?
+                ''', (law_dict['id'],)).fetchall()
+
+                for article in law_articles:
+                    article_dict = dict(article)
+                    if not any(r['id'] == article_dict['id'] for r in results):
+                        results.append(article_dict)
+
     conn.close()
 
     # Генерация краткого ответа
     answer = None
-    if results:
+    if matched_laws:
+        # Если нашли сам закон — объясняем что это
+        law = matched_laws[0]
+        answer = f"{law['number']} «{law['title']}» ({law['year']}) — {law['description']}"
+        if len(matched_laws) > 1:
+            others = ', '.join([f"{l['number']}" for l in matched_laws[1:3]])
+            answer += f" Также найдены связанные документы: {others}."
+    elif results:
+        # Иначе — извлекаем релевантные предложения
         excerpts = []
         for r in results[:3]:
             content = r['content']
-            # Находим предложение с ключевым словом
             sentences = content.replace('!', '.').replace('?', '.').split('.')
             for sentence in sentences:
                 sentence = sentence.strip()
@@ -134,13 +167,12 @@ def api_ask():
                     break
             else:
                 if len(content) > 50:
-                    excerpts.append(content[:200] + '...')
-
+                    excerpts.append(content[:200])
         if excerpts:
             answer = 'На основании найденных нормативных актов: ' + ' '.join(excerpts[:2])
 
     return jsonify({
-        'articles': results[:5],
+        'articles': results[:6],
         'answer': answer,
         'keywords': keywords
     })
