@@ -5,6 +5,35 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Задать вопрос</title>
     <link rel="stylesheet" href="/static/css/style.css">
+    <style>
+        .answer-box {
+            background: linear-gradient(135deg, #0f2544, #1a3a5c);
+            color: white;
+            border-radius: 14px;
+            padding: 24px 28px;
+            margin-bottom: 28px;
+        }
+        .answer-box .answer-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            opacity: 0.6;
+            margin-bottom: 10px;
+        }
+        .answer-box .answer-text {
+            font-size: 15px;
+            line-height: 1.7;
+        }
+        mark {
+            background: #fff176;
+            color: #0f2544;
+            padding: 1px 2px;
+            border-radius: 3px;
+        }
+        .result-card mark {
+            background: #fff176;
+        }
+    </style>
 </head>
 <body>
     <header>
@@ -15,7 +44,7 @@
 
     <main class="ask-main">
         <div class="ask-form">
-            <input type="text" id="question" placeholder="Например: как защитить персональные данные сотрудников?">
+            <input type="text" id="question" placeholder="Например: можно ли использовать цифровую подпись для платежей?">
             <button onclick="askQuestion()">Найти ответ</button>
         </div>
 
@@ -23,6 +52,16 @@
     </main>
 
     <script>
+        function highlight(text, keywords) {
+            if (!keywords || keywords.length === 0) return text;
+            const pattern = keywords
+                .filter(k => k.length > 3)
+                .map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+                .join('|');
+            if (!pattern) return text;
+            return text.replace(new RegExp(`(${pattern})`, 'gi'), '<mark>$1</mark>');
+        }
+
         function askQuestion() {
             const question = document.getElementById('question').value.trim();
             if (!question) return;
@@ -33,29 +72,44 @@
             fetch('/api/ask', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({question: question})
+                body: JSON.stringify({question})
             })
             .then(res => res.json())
-            .then(results => {
-                if (results.length === 0) {
+            .then(data => {
+                const { articles, answer, keywords } = data;
+
+                if (!articles || articles.length === 0) {
                     resultsDiv.innerHTML = '<p class="no-results">Ничего не найдено. Попробуйте другие ключевые слова.</p>';
                     return;
                 }
 
-                resultsDiv.innerHTML = `
-                    <h2 class="results-title">Найдено ${results.length} релевантных статей:</h2>
-                    ${results.map(r => `
-                        <div class="result-card" onclick="window.location='/law/${r.law_id}'">
-                            <div class="result-header">
-                                <span class="law-number">${r.law_number}</span>
-                                <span class="result-law-title">${r.law_title}</span>
-                            </div>
-                            <h4>Статья ${r.number}. ${r.title}</h4>
-                            <p>${r.content}</p>
-                            <span class="result-link">Перейти к закону →</span>
+                let html = '';
+
+                // Краткий ответ
+                if (answer) {
+                    html += `
+                        <div class="answer-box">
+                            <div class="answer-label">Краткий ответ</div>
+                            <div class="answer-text">${highlight(answer, keywords)}</div>
                         </div>
-                    `).join('')}
-                `;
+                    `;
+                }
+
+                html += `<h2 class="results-title">Найдено ${articles.length} релевантных статей:</h2>`;
+
+                html += articles.map(r => `
+                    <div class="result-card" onclick="window.location='/law/${r.law_id}'">
+                        <div class="result-header">
+                            <span class="law-number">${r.law_number}</span>
+                            <span class="result-law-title">${r.law_title}</span>
+                        </div>
+                        <h4>Статья ${r.number}. ${highlight(r.title, keywords)}</h4>
+                        <p>${highlight(r.content, keywords)}</p>
+                        <span class="result-link">Перейти к закону →</span>
+                    </div>
+                `).join('');
+
+                resultsDiv.innerHTML = html;
             });
         }
 

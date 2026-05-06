@@ -99,12 +99,11 @@ def ask():
 def api_ask():
     data = request.json
     question = data.get('question', '').lower()
-    
     keywords = [w for w in question.split() if len(w) > 3]
-    
+
     conn = get_db()
     results = []
-    
+
     for keyword in keywords:
         articles = conn.execute('''
             SELECT a.*, l.title as law_title, l.number as law_number
@@ -112,13 +111,36 @@ def api_ask():
             JOIN laws l ON a.law_id = l.id
             WHERE LOWER(a.content) LIKE ? OR LOWER(a.title) LIKE ?
         ''', (f'%{keyword}%', f'%{keyword}%')).fetchall()
-        
+
         for article in articles:
             article_dict = dict(article)
             if not any(r['id'] == article_dict['id'] for r in results):
                 results.append(article_dict)
-    
+
     conn.close()
-    return jsonify(results[:5])
-if __name__ == '__main__':
-    app.run(debug=True)
+
+    # Генерация краткого ответа
+    answer = None
+    if results:
+        excerpts = []
+        for r in results[:3]:
+            content = r['content']
+            # Находим предложение с ключевым словом
+            sentences = content.replace('!', '.').replace('?', '.').split('.')
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if any(kw in sentence.lower() for kw in keywords) and len(sentence) > 30:
+                    excerpts.append(sentence)
+                    break
+            else:
+                if len(content) > 50:
+                    excerpts.append(content[:200] + '...')
+
+        if excerpts:
+            answer = 'На основании найденных нормативных актов: ' + ' '.join(excerpts[:2])
+
+    return jsonify({
+        'articles': results[:5],
+        'answer': answer,
+        'keywords': keywords
+    })
