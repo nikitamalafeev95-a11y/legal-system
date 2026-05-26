@@ -1,9 +1,10 @@
+import os
 from flask import Flask, jsonify, render_template, request, session, redirect, url_for
 import sqlite3
 
 app = Flask(__name__)
-app.secret_key = 'super_secret_fixed_key_diploma_2024'
-ADMIN_PASSWORD = 'admin123'
+app.secret_key = os.environ.get('SECRET_KEY') or os.urandom(24)
+ADMIN_PASSWORD = os.environ['ADMIN_PASSWORD']
 
 def get_db():
     conn = sqlite3.connect('laws.db')
