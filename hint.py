@@ -24,6 +24,7 @@ BASE = Path(__file__).resolve().parent
 CONFIG_FILE = BASE / "config.json"
 TASK_FILE = BASE / "task.txt"
 PROMPT_FILE = BASE / "system_prompt.txt"
+SCRIPT_FILE = BASE / "script.txt"
 LOG_FILE = BASE / "hint.log"
 IS_WIN = sys.platform == "win32"
 SHOT_NAME = "shot.png"
@@ -113,6 +114,34 @@ def write_task(text):
     TASK_FILE.write_text(text.strip() + "\n", encoding="utf-8")
 
 
+def read_script():
+    """Скрипт встречи и прочие материалы по клиенту. Файла может не быть."""
+    if not SCRIPT_FILE.exists():
+        return ""
+    return SCRIPT_FILE.read_text(encoding="utf-8-sig").strip()
+
+
+def write_script(text):
+    SCRIPT_FILE.write_text(text.strip() + "\n", encoding="utf-8")
+
+
+def build_system(instructions, script):
+    """Системная часть запроса: инструкция и, если есть, скрипт встречи.
+    Скрипт стоит здесь, а не в тексте запроса: эта часть между нажатиями не
+    меняется, поэтому Claude Code берёт её из кэша, а не обрабатывает заново."""
+    text = instructions.strip()
+    if script:
+        text += ("\n\nСкрипт встречи и материалы по клиенту (справочно, не "
+                 "пересказывай; текущий пункт смотри в задаче):\n" + script)
+    return text + "\n"
+
+
+def write_system(path):
+    Path(path).write_text(
+        build_system(PROMPT_FILE.read_text(encoding="utf-8-sig"), read_script()),
+        encoding="utf-8")
+
+
 # ------------------------------------------------------- запрос и история
 
 def short(text, limit):
@@ -184,14 +213,14 @@ def shot_rules(workdir):
     return rules
 
 
-def build_command(cfg, exe, workdir):
+def build_command(cfg, exe, workdir, sysfile):
     """Команда headless-запуска. Модели доступно только чтение файла снимка:
     единственный инструмент - Read, режим dontAsk запрещает читать что-либо
     вне рабочей папки, а в рабочей папке лежит только снимок."""
     return [
         exe, "-p",
         "--model", str(cfg["model"]),
-        "--system-prompt-file", str(PROMPT_FILE),  # заменяет стандартную инструкцию
+        "--system-prompt-file", str(sysfile),  # заменяет стандартную инструкцию
         "--tools", "Read",                        # других инструментов нет
         "--allowedTools", *shot_rules(workdir),
         "--permission-mode", "dontAsk",           # всё остальное запрещено
@@ -210,12 +239,13 @@ def child_env():
     return env
 
 
-def ask_claude(cfg, prompt, workdir):
-    """Отправляет запрос, возвращает текст ответа. Снимок уже лежит в workdir."""
+def ask_claude(cfg, prompt, workdir, sysfile):
+    """Отправляет запрос, возвращает текст ответа. Снимок уже лежит в workdir,
+    системная часть - в файле sysfile (вне workdir)."""
     exe = find_claude(cfg)
     try:
         proc = subprocess.run(
-            build_command(cfg, exe, workdir), input=prompt, capture_output=True,
+            build_command(cfg, exe, workdir, sysfile), input=prompt, capture_output=True,
             encoding="utf-8", errors="replace", cwd=str(workdir),
             env=child_env(), timeout=float(cfg["timeout_sec"]),
             creationflags=0x08000000 if IS_WIN else 0)  # CREATE_NO_WINDOW
@@ -512,7 +542,10 @@ class App:
         self.dialog = None
         self.target_hwnd = None
         self.windows = []                      # окна, скрываемые от захвата
-        self.workdir = make_workdir("hint_")
+        self.tmpdir = make_workdir("hint_")
+        self.workdir = self.tmpdir / "shot"    # здесь лежит только снимок
+        self.workdir.mkdir()
+        self.sysfile = self.tmpdir / "system.txt"
 
         self.root = root = tk.Tk()
         root.title("Подсказчик")
@@ -524,6 +557,7 @@ class App:
         bar = tk.Frame(root, bg=BAR)
         bar.pack(fill="x")
         self._button(bar, "Задача", self.edit_task).pack(side="left")
+        self._button(bar, "Скрипт", self.edit_script).pack(side="left")
         self._button(bar, "Новая сессия", self.new_session).pack(side="left")
         self._button(bar, "×", self.quit).pack(side="right")
         self._button(bar, "A+", lambda: self.change_font(1)).pack(side="right")
@@ -679,7 +713,8 @@ class App:
         started = time.time()
         try:
             im.save(shot, "PNG")
-            text = ask_claude(self.cfg, prompt, self.workdir)
+            write_system(self.sysfile)
+            text = ask_claude(self.cfg, prompt, self.workdir, self.sysfile)
             logging.info("запрос: ответ за %.1f с", time.time() - started)
             self.events.put(("answer", text, sig))
         except HintError as e:
@@ -725,10 +760,14 @@ class App:
 
     def _place_popup(self, win, focus_widget):
         win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         x = self.root.winfo_x()
         y = self.root.winfo_y() + self.root.winfo_height() + 4
-        if y + win.winfo_reqheight() > win.winfo_screenheight():
-            y = max(0, self.root.winfo_y() - win.winfo_reqheight() - 4)
+        if y + h > sh:                         # не помещается под окном
+            y = self.root.winfo_y() - h - 4
+        x = max(0, min(x, sw - w))
+        y = max(0, min(y, sh - h))
         win.geometry("+%d+%d" % (x, y))
         self._reveal(win)
         if IS_WIN:
@@ -775,22 +814,38 @@ class App:
         self._place_popup(win, entry)
 
     def edit_task(self):
+        self._editor("Задача клиента (подставляется в каждый запрос)",
+                     read_task, write_task, 60, 10, "Задача сохранена.")
+
+    def edit_script(self):
+        self._editor("Скрипт встречи и материалы по клиенту (можно вставить "
+                     "целиком)", read_script, write_script, 90, 26,
+                     "Скрипт сохранён.")
+
+    def _editor(self, title, read, write, width, height, saved_text):
         if self.dialog is not None:
             return
         tk = self.tk
         win = self._popup()
-        tk.Label(win, text="Задача клиента (подставляется в каждый запрос)",
-                 bg=BAR, fg=DIM, font=("Segoe UI", 9)).pack(anchor="w")
-        box = tk.Text(win, width=60, height=10, font=self._font(), bg=BG, fg=FG,
-                      insertbackground=FG, relief="flat", wrap="word", undo=True)
-        box.pack(pady=4)
-        box.insert("1.0", read_task())
+        tk.Label(win, text=title, bg=BAR, fg=DIM,
+                 font=("Segoe UI", 9)).pack(anchor="w")
+        frame = tk.Frame(win, bg=BAR)
+        frame.pack(pady=4)
+        scroll = tk.Scrollbar(frame)
+        box = tk.Text(frame, width=width, height=height, font=self._font(),
+                      bg=BG, fg=FG, insertbackground=FG, relief="flat",
+                      wrap="word", undo=True, yscrollcommand=scroll.set)
+        scroll.configure(command=box.yview)
+        box.pack(side="left")
+        scroll.pack(side="right", fill="y")
+        box.insert("1.0", read())
         self._ru_hotkeys(box)
 
         def save(_e=None):
-            write_task(box.get("1.0", "end"))
+            write(box.get("1.0", "end"))
             self._close_popup()
-            self.show("Задача сохранена.")
+            self.last_sig = None       # контекст изменился - не повторять ответ
+            self.show(saved_text)
             return "break"
 
         row = tk.Frame(win, bg=BAR)
@@ -806,14 +861,14 @@ class App:
     def quit(self):
         if self.hook:
             self.hook.stop()
-        shutil.rmtree(self.workdir, ignore_errors=True)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
         self.root.destroy()
 
     def run(self):
         try:
             self.root.mainloop()
         finally:
-            shutil.rmtree(self.workdir, ignore_errors=True)
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
 # --------------------------------------------------------------- проверка
@@ -861,8 +916,11 @@ def check():
 
     print("Тестовый запрос (несколько секунд)...")
     from PIL import Image, ImageDraw
-    workdir = make_workdir("hint_check_")
+    tmpdir = make_workdir("hint_check_")
+    workdir = tmpdir / "shot"
     try:
+        workdir.mkdir()
+        write_system(tmpdir / "system.txt")
         im = Image.new("RGB", (600, 200), "white")
         draw = ImageDraw.Draw(im)
         draw.rectangle((0, 0, 600, 30), fill=(255, 221, 85))
@@ -870,7 +928,8 @@ def check():
         draw.text((20, 80), "Error: period is closed.   [ OK ]", fill="black")
         im.save(workdir / SHOT_NAME)
         started = time.time()
-        text = ask_claude(cfg, build_prompt(read_task(), [], ""), workdir)
+        text = ask_claude(cfg, build_prompt(read_task(), [], ""), workdir,
+                          tmpdir / "system.txt")
         advice, screen = parse_answer(text)
         line(bool(advice), "ответ получен за %.1f с" % (time.time() - started))
         print("       Подсказка: " + short(advice, 200))
@@ -880,7 +939,7 @@ def check():
         print("       Папка снимка: %s" % workdir)
         print("       Правила: %s" % " ".join(shot_rules(workdir)))
     finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        shutil.rmtree(tmpdir, ignore_errors=True)
     print("\nВсё готово, запускайте run.bat." if ok
           else "\nЕсть проблемы - см. строки с [ !! ].")
     return 0 if ok else 1

@@ -67,7 +67,8 @@ class CoreTest(unittest.TestCase):
             hint.parse_key("нет такой")
 
     def test_command_allows_only_reading_the_shot(self):
-        cmd = hint.build_command(dict(hint.DEFAULTS), "claude", "/tmp/hint_x")
+        cmd = hint.build_command(dict(hint.DEFAULTS), "claude", "/tmp/hint_x",
+                                 "/tmp/sys.txt")
         self.assertEqual(cmd[cmd.index("--tools") + 1], "Read")
         i = cmd.index("--allowedTools")
         self.assertEqual(cmd[i + 1:i + 3],
@@ -83,6 +84,12 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(rules, ["Read(./shot.png)",
                                  "Read(//C:/Users/Иван/Temp/hint_x/shot.png)",
                                  "Read(//c/Users/Иван/Temp/hint_x/shot.png)"])
+
+    def test_system_part_carries_script(self):
+        self.assertEqual(hint.build_system("Инструкция\n", ""), "Инструкция\n")
+        text = hint.build_system("Инструкция", "1. Проверить банк")
+        self.assertTrue(text.startswith("Инструкция\n\nСкрипт встречи"))
+        self.assertIn("1. Проверить банк", text)
 
     def test_child_env_has_no_api_key(self):
         import os
