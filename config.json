@@ -16,5 +16,7 @@
   "timeout_sec": 90,
   "same_shot_threshold": 0.05,
   "hook_refresh_sec": 5,
-  "claude_path": ""
+  "claude_path": "",
+  "script_step": 1,
+  "off_script": false
 }

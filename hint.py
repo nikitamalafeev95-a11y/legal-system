@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -44,6 +45,8 @@ DEFAULTS = {
     "same_shot_threshold": 0.05,      # допуск при сравнении снимков
     "hook_refresh_sec": 5,            # переустановка перехвата клавиш, 0 - выкл
     "claude_path": "",                # полный путь к claude, если не в PATH
+    "script_step": 1,                 # текущий пункт скрипта (меняется кнопками)
+    "off_script": False,              # режим "вне скрипта"
 }
 
 TASK_TEMPLATE = (
@@ -126,6 +129,22 @@ def write_script(text):
     SCRIPT_FILE.write_text(text.strip() + "\n", encoding="utf-8")
 
 
+STEP_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)[.)]\s+(\S.*)$")
+
+
+def parse_steps(script):
+    """Пункты скрипта: строки вида "1. текст" или "2) текст" (и 1.1. текст).
+    Строки без номера относятся к предыдущему пункту."""
+    steps = []
+    for line in script.splitlines():
+        m = STEP_RE.match(line)
+        if m:
+            steps.append([m.group(1), m.group(2).strip()])
+        elif steps and line.strip():
+            steps[-1][1] += " " + line.strip()
+    return [(num, text) for num, text in steps]
+
+
 def build_system(instructions, script):
     """Системная часть запроса: инструкция и, если есть, скрипт встречи.
     Скрипт стоит здесь, а не в тексте запроса: эта часть между нажатиями не
@@ -133,7 +152,7 @@ def build_system(instructions, script):
     text = instructions.strip()
     if script:
         text += ("\n\nСкрипт встречи и материалы по клиенту (справочно, не "
-                 "пересказывай; текущий пункт смотри в задаче):\n" + script)
+                 "пересказывай; текущий пункт указан в запросе):\n" + script)
     return text + "\n"
 
 
@@ -151,16 +170,30 @@ def short(text, limit):
     return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 
-def build_prompt(task, history, question):
+def build_prompt(task, history, question, step=None, off_script=False,
+                 with_shot=True):
+    """Текст запроса. step - (номер, текст) текущего пункта скрипта."""
     parts = ["Задача клиента:\n" + (task or "(не заполнена)")]
+    if off_script:
+        parts.append("Сейчас внедренец отклонился от скрипта: ситуация не "
+                     "связана с его пунктами. Помоги с тем, что на экране, "
+                     "к скрипту не возвращай.")
+    elif step:
+        parts.append("Текущий пункт скрипта: %s. %s" % (step[0], short(step[1], 400)))
     if history:
         lines = ["%d. Экран: %s. Совет: %s" % (i, screen, advice)
                  for i, (screen, advice) in enumerate(history, 1)]
         parts.append("Предыдущие шаги (от старых к новым):\n" + "\n".join(lines))
     if question:
-        parts.append("Вопрос внедренца к снимку: " + question.strip())
-    parts.append("Текущий экран - файл %s в текущей папке. Прочитай его и ответь."
-                 % SHOT_NAME)
+        parts.append("Вопрос внедренца%s: %s"
+                     % (" к снимку" if with_shot else "", question.strip()))
+    if with_shot:
+        parts.append("Текущий экран - файл %s в текущей папке. Прочитай его и "
+                     "ответь." % SHOT_NAME)
+    else:
+        parts.append("В этом запросе снимка нет: файл не читай, инструмент Read "
+                     "не вызывай. Ответь на вопрос по задаче и предыдущим шагам. "
+                     "Строку ЭКРАН не добавляй.")
     return "\n\n".join(parts)
 
 
@@ -250,7 +283,7 @@ def child_env():
     return env
 
 
-def ask_claude(cfg, prompt, workdir, sysfile):
+def ask_claude(cfg, prompt, workdir, sysfile, need_shot=True):
     """Отправляет запрос, возвращает текст ответа. Снимок уже лежит в workdir,
     системная часть - в файле sysfile (вне workdir)."""
     exe = find_claude(cfg)
@@ -279,7 +312,7 @@ def ask_claude(cfg, prompt, workdir, sysfile):
     if data is None:
         msg = short(out or proc.stderr or "пустой ответ", 300)
         raise HintError("Claude Code вернул ошибку: " + msg)
-    if data.get("permission_denials"):
+    if need_shot and data.get("permission_denials"):
         raise HintError("Claude Code не смог прочитать снимок: доступ к файлу "
                         "отклонён. Сообщите разработчику.")
     result = str(data.get("result") or "").strip()
@@ -549,6 +582,9 @@ class App:
         self.history = deque(maxlen=max(0, int(cfg["history_pairs"])))
         self.last_sig = None
         self.last_answer = ""
+        self.hints = []                        # показанные подсказки, для листания
+        self.hint_pos = -1
+        self.steps = parse_steps(read_script())
         self.busy = False
         self.dialog = None
         self.target_hwnd = None
@@ -576,10 +612,30 @@ class App:
         self.model_btn = self._button(bar, str(cfg["model"]), self.switch_model)
         self.model_btn.pack(side="right")
 
+        nav = tk.Frame(root, bg=BG)
+        nav.pack(fill="x")
+        self._caption(nav, "Подсказка").pack(side="left", padx=(8, 0))
+        self._button(nav, "<", lambda: self.page_hint(-1), BG).pack(side="left")
+        self.hint_lbl = self._caption(nav, "0/0")
+        self.hint_lbl.pack(side="left")
+        self._button(nav, ">", lambda: self.page_hint(1), BG).pack(side="left")
+        self.step_box = tk.Frame(nav, bg=BG)   # виден, когда в скрипте есть пункты
+        self.off_btn = self._button(self.step_box, "Вне скрипта",
+                                    self.toggle_off_script, BG)
+        self.off_btn.pack(side="right")
+        self._button(self.step_box, ">", lambda: self.move_step(1), BG).pack(side="right")
+        self.step_lbl = self._caption(self.step_box, "")
+        self.step_lbl.pack(side="right")
+        self._button(self.step_box, "<", lambda: self.move_step(-1), BG).pack(side="right")
+        self._caption(self.step_box, "Пункт").pack(side="right")
+        self.step_text = tk.Label(root, bg=BG, fg=DIM, anchor="w", justify="left",
+                                  padx=10, font=("Segoe UI", 9))
+
         self.label = tk.Label(root, bg=BG, fg=FG, justify="left", anchor="nw",
                               padx=10, pady=8)
         self.label.pack(fill="both", expand=True)
-        for w in (bar, self.label):
+        self.refresh_steps()
+        for w in (bar, nav, self.step_text, self.label):
             w.bind("<ButtonPress-1>", self._drag_start)
             w.bind("<B1-Motion>", self._drag_move)
             w.bind("<ButtonRelease-1>", self._drag_end)
@@ -606,9 +662,13 @@ class App:
 
     # --- оформление
 
-    def _button(self, parent, text, command):
+    def _caption(self, parent, text):
+        return self.tk.Label(parent, text=text, bg=BG, fg=DIM,
+                             font=("Segoe UI", 9))
+
+    def _button(self, parent, text, command, bg=BAR):
         return self.tk.Button(
-            parent, text=text, command=command, bg=BAR, fg=DIM, bd=0,
+            parent, text=text, command=command, bg=bg, fg=DIM, bd=0,
             activebackground="#3a3e46", activeforeground=FG, padx=8, pady=2,
             font=("Segoe UI", 9), takefocus=0, cursor="hand2")
 
@@ -647,6 +707,70 @@ class App:
         save_config(self.cfg)
         self.model_btn.configure(text=self.cfg["model"])
         self.last_sig = None
+
+    # --- листание подсказок
+
+    def page_hint(self, step):
+        if not self.hints:
+            return
+        self.hint_pos = min(len(self.hints) - 1, max(0, self.hint_pos + step))
+        self._show_hint()
+
+    def _show_hint(self):
+        self.hint_lbl.configure(text="%d/%d" % (self.hint_pos + 1, len(self.hints)))
+        self.show(self.hints[self.hint_pos])
+
+    def add_hint(self, text):
+        self.hints.append(text)
+        del self.hints[:-50]                   # в памяти не больше 50 подсказок
+        self.hint_pos = len(self.hints) - 1
+        self._show_hint()
+
+    # --- пункты скрипта
+
+    def current_step(self):
+        if not self.steps:
+            return None
+        pos = min(len(self.steps), max(1, int(self.cfg["script_step"])))
+        return self.steps[pos - 1]
+
+    def refresh_steps(self):
+        """Обновляет строку пункта после смены пункта или правки скрипта."""
+        self.steps = parse_steps(read_script())
+        if not self.steps:
+            self.step_box.pack_forget()
+            self.step_text.pack_forget()
+            return
+        pos = min(len(self.steps), max(1, int(self.cfg["script_step"])))
+        self.cfg["script_step"] = pos
+        off = bool(self.cfg["off_script"])
+        num, text = self.steps[pos - 1]
+        self.step_lbl.configure(text="%d/%d" % (pos, len(self.steps)))
+        self.off_btn.configure(fg="#ffb454" if off else DIM)
+        self.step_text.configure(
+            text="Вне скрипта: подсказки без привязки к пунктам" if off
+            else short("%s. %s" % (num, text), 110),
+            wraplength=int(self.cfg["window_width"]) - 20)
+        self.step_box.pack(side="right", padx=(0, 4))
+        self.step_text.pack(fill="x", before=self.label)
+
+    def _steps_changed(self):
+        save_config(self.cfg)
+        self.last_sig = None           # контекст изменился - не повторять ответ
+        self.refresh_steps()
+        self.show(self.label.cget("text"))
+
+    def move_step(self, delta):
+        if not self.steps:
+            return
+        self.cfg["script_step"] = min(
+            len(self.steps), max(1, int(self.cfg["script_step"]) + delta))
+        self.cfg["off_script"] = False         # смена пункта возвращает к скрипту
+        self._steps_changed()
+
+    def toggle_off_script(self):
+        self.cfg["off_script"] = not self.cfg["off_script"]
+        self._steps_changed()
 
     # --- перетаскивание
 
@@ -720,32 +844,41 @@ class App:
             self.start_request(im, "")
 
     def start_request(self, im, question):
-        sig = signature(im)
-        if (not question and self.last_answer
+        """im=None - вопрос без снимка: по задаче и предыдущим шагам."""
+        sig = signature(im) if im is not None else None
+        if (im is not None and not question and self.last_answer
                 and same_shot(sig, self.last_sig, self.cfg["same_shot_threshold"])):
             logging.info("повтор снимка, запрос не отправлялся")
-            self.show(self.last_answer)
+            if self.hints:
+                self.hint_pos = len(self.hints) - 1
+                self._show_hint()
             return
         self.busy = True
-        prompt = build_prompt(read_task(), list(self.history), question)
-        threading.Thread(target=self._worker, args=(im, prompt, sig),
+        prompt = build_prompt(
+            read_task(), list(self.history), question,
+            step=self.current_step(), off_script=bool(self.cfg["off_script"]),
+            with_shot=im is not None)
+        threading.Thread(target=self._worker, args=(im, prompt, sig, question),
                          daemon=True).start()
 
-    def _worker(self, im, prompt, sig):
+    def _worker(self, im, prompt, sig, question):
         shot = self.workdir / SHOT_NAME
         started = time.time()
+        kind = "запрос" if im is not None else "вопрос без снимка"
         try:
-            im.save(shot, "PNG")
+            if im is not None:
+                im.save(shot, "PNG")
             write_system(self.sysfile)
-            text = ask_claude(self.cfg, prompt, self.workdir, self.sysfile)
-            logging.info("запрос: ответ за %.1f с", time.time() - started)
-            self.events.put(("answer", text, sig))
+            text = ask_claude(self.cfg, prompt, self.workdir, self.sysfile,
+                              need_shot=im is not None)
+            logging.info("%s: ответ за %.1f с", kind, time.time() - started)
+            self.events.put(("answer", text, sig, question))
         except HintError as e:
-            logging.info("запрос: ошибка за %.1f с", time.time() - started)
+            logging.info("%s: ошибка за %.1f с", kind, time.time() - started)
             self.events.put(("error", str(e)))
         except Exception as e:
-            logging.info("запрос: сбой %s за %.1f с",
-                         type(e).__name__, time.time() - started)
+            logging.info("%s: сбой %s за %.1f с",
+                         kind, type(e).__name__, time.time() - started)
             self.events.put(("error", "Сбой программы: %s" % type(e).__name__))
         finally:
             try:
@@ -753,19 +886,27 @@ class App:
             except OSError:
                 pass
 
-    def on_answer(self, text, sig):
+    def on_answer(self, text, sig, question):
         self.busy = False
         advice, screen = parse_answer(text)
         advice = advice or text.strip()
+        if sig is None:                        # вопрос без снимка
+            screen = "без снимка, вопрос: " + question
+        else:
+            self.last_sig, self.last_answer = sig, advice
         if self.history.maxlen:
             self.history.append((short(screen or "не описан", 150),
                                  short(advice, 220)))
-        self.last_sig, self.last_answer = sig, advice
-        self.show(advice)
+        self.add_hint(advice)
 
     def new_session(self):
         self.history.clear()
         self.last_sig, self.last_answer = None, ""
+        self.hints, self.hint_pos = [], -1
+        self.cfg["script_step"], self.cfg["off_script"] = 1, False
+        save_config(self.cfg)
+        self.refresh_steps()
+        self.hint_lbl.configure(text="0/0")
         self.show("Новая сессия. История очищена.")
 
     # --- всплывающие поля ввода
@@ -820,7 +961,8 @@ class App:
     def ask_question(self, im):
         tk = self.tk
         win = self._popup()
-        tk.Label(win, text="Вопрос к снимку (Enter - отправить, Esc - отмена)",
+        tk.Label(win, text="Вопрос. Enter - со снимком, Ctrl+Enter - без снимка, "
+                           "Esc - отмена",
                  bg=BAR, fg=DIM, font=("Segoe UI", 9)).pack(anchor="w")
         entry = tk.Entry(win, width=52, font=self._font(), bg=BG, fg=FG,
                          insertbackground=FG, relief="flat")
@@ -832,6 +974,14 @@ class App:
             self._close_popup()
             self.start_request(im, question)
 
+        def submit_text_only(_e=None):
+            question = entry.get().strip()
+            self._close_popup()
+            if question:               # без снимка нужен хотя бы вопрос
+                self.start_request(None, question)
+            return "break"
+
+        entry.bind("<Control-Return>", submit_text_only)
         entry.bind("<Return>", submit)
         entry.bind("<Escape>", lambda _e: self._close_popup())
         self._place_popup(win, entry)
@@ -868,6 +1018,7 @@ class App:
             write(box.get("1.0", "end"))
             self._close_popup()
             self.last_sig = None       # контекст изменился - не повторять ответ
+            self.refresh_steps()
             self.show(saved_text)
             return "break"
 

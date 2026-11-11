@@ -101,6 +101,30 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(hint.next_model({"model": "x", "models": ["a"]}), "a")
         self.assertEqual(hint.next_model({"model": "x", "models": []}), "x")
 
+    def test_parse_steps(self):
+        steps = hint.parse_steps(
+            "Клиент: Ромашка\n1. Проверить банк\n  продолжение пункта\n"
+            "2) Настроить права\n2.1. Роль бухгалтера\nбез номера")
+        self.assertEqual(steps, [("1", "Проверить банк продолжение пункта"),
+                                 ("2", "Настроить права"),
+                                 ("2.1", "Роль бухгалтера без номера")])
+        self.assertEqual(hint.parse_steps("просто текст\nбез пунктов"), [])
+
+    def test_prompt_step_and_off_script(self):
+        p = hint.build_prompt("т", [], "", step=("4", "Настроить обмен"))
+        self.assertIn("Текущий пункт скрипта: 4. Настроить обмен", p)
+        p = hint.build_prompt("т", [], "", step=("4", "Настроить обмен"),
+                              off_script=True)
+        self.assertIn("отклонился от скрипта", p)
+        self.assertNotIn("Текущий пункт скрипта", p)
+
+    def test_prompt_without_shot(self):
+        p = hint.build_prompt("т", [("экран", "совет")], "а что дальше?",
+                              with_shot=False)
+        self.assertIn("снимка нет", p)
+        self.assertIn("а что дальше?", p)
+        self.assertNotIn("Прочитай его и ответь", p)
+
     def test_child_env_has_no_api_key(self):
         import os
         os.environ["ANTHROPIC_API_KEY"] = "x"
