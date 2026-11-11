@@ -165,7 +165,26 @@ def find_claude(cfg):
                     "(см. пособие) или укажите claude_path в config.json.")
 
 
-def build_command(cfg, exe):
+def make_workdir(prefix):
+    """Временная папка для снимка. Путь приводится к полному виду: Windows
+    может выдать короткое имя (NMALAF~1), и тогда Claude Code считает файл
+    лежащим вне рабочей папки и отказывается его читать."""
+    return Path(os.path.realpath(tempfile.mkdtemp(prefix=prefix)))
+
+
+def shot_rules(workdir):
+    """Правила доступа: только файл снимка, в относительной и полной записи."""
+    rules = ["Read(./%s)" % SHOT_NAME]
+    full = (Path(workdir) / SHOT_NAME).as_posix()
+    if len(full) > 1 and full[1] == ":":            # C:/Users/... (Windows)
+        rules.append("Read(//%s)" % full)
+        rules.append("Read(//%s%s)" % (full[0].lower(), full[2:]))
+    else:
+        rules.append("Read(/%s)" % full)
+    return rules
+
+
+def build_command(cfg, exe, workdir):
     """Команда headless-запуска. Модели доступно только чтение файла снимка:
     единственный инструмент - Read, режим dontAsk запрещает читать что-либо
     вне рабочей папки, а в рабочей папке лежит только снимок."""
@@ -174,7 +193,7 @@ def build_command(cfg, exe):
         "--model", str(cfg["model"]),
         "--system-prompt-file", str(PROMPT_FILE),  # заменяет стандартную инструкцию
         "--tools", "Read",                        # других инструментов нет
-        "--allowedTools", "Read(./%s)" % SHOT_NAME,
+        "--allowedTools", *shot_rules(workdir),
         "--permission-mode", "dontAsk",           # всё остальное запрещено
         "--strict-mcp-config",                    # без MCP-серверов
         "--no-session-persistence",               # сессию на диск не писать
@@ -196,7 +215,7 @@ def ask_claude(cfg, prompt, workdir):
     exe = find_claude(cfg)
     try:
         proc = subprocess.run(
-            build_command(cfg, exe), input=prompt, capture_output=True,
+            build_command(cfg, exe, workdir), input=prompt, capture_output=True,
             encoding="utf-8", errors="replace", cwd=str(workdir),
             env=child_env(), timeout=float(cfg["timeout_sec"]),
             creationflags=0x08000000 if IS_WIN else 0)  # CREATE_NO_WINDOW
@@ -219,6 +238,9 @@ def ask_claude(cfg, prompt, workdir):
     if data is None:
         msg = short(out or proc.stderr or "пустой ответ", 300)
         raise HintError("Claude Code вернул ошибку: " + msg)
+    if data.get("permission_denials"):
+        raise HintError("Claude Code не смог прочитать снимок: доступ к файлу "
+                        "отклонён. Сообщите разработчику.")
     result = str(data.get("result") or "").strip()
     if data.get("is_error") or proc.returncode != 0 or not result:
         low = result.lower()
@@ -490,7 +512,7 @@ class App:
         self.dialog = None
         self.target_hwnd = None
         self.windows = []                      # окна, скрываемые от захвата
-        self.workdir = Path(tempfile.mkdtemp(prefix="hint_"))
+        self.workdir = make_workdir("hint_")
 
         self.root = root = tk.Tk()
         root.title("Подсказчик")
@@ -839,7 +861,7 @@ def check():
 
     print("Тестовый запрос (несколько секунд)...")
     from PIL import Image, ImageDraw
-    workdir = Path(tempfile.mkdtemp(prefix="hint_check_"))
+    workdir = make_workdir("hint_check_")
     try:
         im = Image.new("RGB", (600, 200), "white")
         draw = ImageDraw.Draw(im)
@@ -855,6 +877,8 @@ def check():
         print("       Экран: " + (screen or "(модель не дала строку ЭКРАН)"))
     except HintError as e:
         line(False, str(e))
+        print("       Папка снимка: %s" % workdir)
+        print("       Правила: %s" % " ".join(shot_rules(workdir)))
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     print("\nВсё готово, запускайте run.bat." if ok

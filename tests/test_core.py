@@ -67,12 +67,22 @@ class CoreTest(unittest.TestCase):
             hint.parse_key("нет такой")
 
     def test_command_allows_only_reading_the_shot(self):
-        cmd = hint.build_command(dict(hint.DEFAULTS), "claude")
+        cmd = hint.build_command(dict(hint.DEFAULTS), "claude", "/tmp/hint_x")
         self.assertEqual(cmd[cmd.index("--tools") + 1], "Read")
-        self.assertEqual(cmd[cmd.index("--allowedTools") + 1], "Read(./shot.png)")
+        i = cmd.index("--allowedTools")
+        self.assertEqual(cmd[i + 1:i + 3],
+                         ["Read(./shot.png)", "Read(//tmp/hint_x/shot.png)"])
+        self.assertEqual(cmd[i + 3], "--permission-mode")
         self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "dontAsk")
         self.assertEqual(cmd[cmd.index("--model") + 1], "haiku")
         self.assertNotIn("--bare", cmd)
+
+    def test_windows_rules_cover_only_the_shot(self):
+        from pathlib import PureWindowsPath
+        rules = hint.shot_rules(PureWindowsPath(r"C:\Users\Иван\Temp\hint_x"))
+        self.assertEqual(rules, ["Read(./shot.png)",
+                                 "Read(//C:/Users/Иван/Temp/hint_x/shot.png)",
+                                 "Read(//c/Users/Иван/Temp/hint_x/shot.png)"])
 
     def test_child_env_has_no_api_key(self):
         import os
