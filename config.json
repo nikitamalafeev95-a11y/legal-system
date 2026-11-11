@@ -3,6 +3,11 @@
   "key_ask": "media_next",
   "shot_width": 1300,
   "model": "haiku",
+  "models": [
+    "haiku",
+    "sonnet",
+    "opus"
+  ],
   "history_pairs": 5,
   "font_size": 11,
   "window_width": 420,

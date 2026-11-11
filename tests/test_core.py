@@ -91,6 +91,16 @@ class CoreTest(unittest.TestCase):
         self.assertTrue(text.startswith("Инструкция\n\nСкрипт встречи"))
         self.assertIn("1. Проверить банк", text)
 
+    def test_model_cycle(self):
+        cfg = {"model": "haiku", "models": ["haiku", "sonnet", "opus"]}
+        seen = []
+        for _ in range(3):
+            cfg["model"] = hint.next_model(cfg)
+            seen.append(cfg["model"])
+        self.assertEqual(seen, ["sonnet", "opus", "haiku"])
+        self.assertEqual(hint.next_model({"model": "x", "models": ["a"]}), "a")
+        self.assertEqual(hint.next_model({"model": "x", "models": []}), "x")
+
     def test_child_env_has_no_api_key(self):
         import os
         os.environ["ANTHROPIC_API_KEY"] = "x"

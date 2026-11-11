@@ -34,6 +34,7 @@ DEFAULTS = {
     "key_ask": "media_next",          # снимок + вопрос
     "shot_width": 1300,               # ширина снимка, px
     "model": "haiku",                 # самая быстрая и дешёвая
+    "models": ["haiku", "sonnet", "opus"],  # по кругу кнопкой в окне
     "history_pairs": 5,               # сколько пар "экран - совет" помнить
     "font_size": 11,
     "window_width": 420,
@@ -211,6 +212,16 @@ def shot_rules(workdir):
     else:
         rules.append("Read(/%s)" % full)
     return rules
+
+
+def next_model(cfg):
+    """Следующая модель из списка models (кнопка в окне подсказок)."""
+    models = [str(m) for m in cfg.get("models") or [] if str(m).strip()]
+    if not models:
+        return str(cfg["model"])
+    if cfg["model"] in models:
+        return models[(models.index(cfg["model"]) + 1) % len(models)]
+    return models[0]
 
 
 def build_command(cfg, exe, workdir, sysfile):
@@ -562,6 +573,8 @@ class App:
         self._button(bar, "×", self.quit).pack(side="right")
         self._button(bar, "A+", lambda: self.change_font(1)).pack(side="right")
         self._button(bar, "A−", lambda: self.change_font(-1)).pack(side="right")
+        self.model_btn = self._button(bar, str(cfg["model"]), self.switch_model)
+        self.model_btn.pack(side="right")
 
         self.label = tk.Label(root, bg=BG, fg=FG, justify="left", anchor="nw",
                               padx=10, pady=8)
@@ -624,6 +637,16 @@ class App:
         self.cfg["font_size"] = size
         save_config(self.cfg)
         self.show(self.label.cget("text"))
+
+    def switch_model(self):
+        """Переключает модель по кругу. Подсказка на экране остаётся, а тот же
+        снимок после переключения отправится заново - уже новой модели."""
+        if self.busy:
+            return
+        self.cfg["model"] = next_model(self.cfg)
+        save_config(self.cfg)
+        self.model_btn.configure(text=self.cfg["model"])
+        self.last_sig = None
 
     # --- перетаскивание
 
