@@ -1,0 +1,15 @@
+{
+  "key_capture": "media_stop",
+  "key_ask": "media_next",
+  "shot_width": 1300,
+  "model": "haiku",
+  "history_pairs": 5,
+  "font_size": 11,
+  "window_width": 420,
+  "window_x": 40,
+  "window_y": 40,
+  "timeout_sec": 90,
+  "same_shot_threshold": 0.05,
+  "hook_refresh_sec": 5,
+  "claude_path": ""
+}
