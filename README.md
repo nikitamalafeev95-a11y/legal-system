@@ -11,4 +11,6 @@
 
 Нужны Windows 10 (2004+) или 11, Python 3.10+, Pillow, Claude Code с входом по подписке.
 
+Голосовая клавиша (необязательно): `python -m pip install -r requirements-voice.txt`. Запись звука встречи и распознавание речи идут на этом компьютере, в Claude уходит только текст.
+
 Тесты логики: `python -m unittest discover tests`.

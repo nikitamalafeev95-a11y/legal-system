@@ -33,6 +33,13 @@ SHOT_NAME = "shot.png"
 DEFAULTS = {
     "key_capture": "media_stop",      # снимок активного окна
     "key_ask": "media_next",          # снимок + вопрос
+    "key_voice": "media_prev",        # держать: запись звука, отпустить: снимок
+    "audio_source": "system",         # system - звук встречи, mic - микрофон, both
+    "whisper_model": "small",         # модель распознавания речи
+    "voice_language": "ru",
+    "voice_max_sec": 90,              # предел одной записи
+    "voice_hint": "Разговор о работе в программе 1С: документы, проведение, "
+                  "закрытие месяца, контрагенты, номенклатура, отчёты.",
     "shot_width": 1300,               # ширина снимка, px
     "model": "haiku",                 # самая быстрая и дешёвая
     "models": ["haiku", "sonnet", "opus"],  # по кругу кнопкой в окне
@@ -171,7 +178,7 @@ def short(text, limit):
 
 
 def build_prompt(task, history, question, step=None, off_script=False,
-                 with_shot=True):
+                 with_shot=True, speech=""):
     """Текст запроса. step - (номер, текст) текущего пункта скрипта."""
     parts = ["Задача клиента:\n" + (task or "(не заполнена)")]
     if off_script:
@@ -187,6 +194,10 @@ def build_prompt(task, history, question, step=None, off_script=False,
     if question:
         parts.append("Вопрос внедренца%s: %s"
                      % (" к снимку" if with_shot else "", question.strip()))
+    if speech:
+        parts.append("Расшифровка записи со встречи, сделанной только что "
+                     "(распознано автоматически, возможны ошибки в словах):\n"
+                     + speech + "\nПо сказанному и по снимку подскажи решение.")
     if with_shot:
         parts.append("Текущий экран - файл %s в текущей папке. Прочитай его и "
                      "ответь." % SHOT_NAME)
@@ -354,6 +365,147 @@ def same_shot(sig_a, sig_b, threshold):
     return diff <= float(threshold)
 
 
+# ---------------------------------------------------------------- голос
+
+VOICE_INSTALL = ("Голосовая клавиша не установлена. Выполните в PowerShell в "
+                 "папке программы: python -m pip install -r requirements-voice.txt")
+SPEAKERS = (("client", "Клиент"), ("me", "Внедренец"))
+
+
+def to_mono16k(raw, channels, rate):
+    """Сырые 16-битные отсчёты -> моно 16 кГц (формат для распознавания)."""
+    import numpy as np
+    data = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    if channels > 1:
+        data = data[:len(data) - len(data) % channels].reshape(-1, channels).mean(axis=1)
+    if rate != 16000 and len(data):
+        n = int(len(data) * 16000 / rate)
+        data = np.interp(np.linspace(0, len(data) - 1, n),
+                         np.arange(len(data)), data).astype(np.float32)
+    return data
+
+
+def speech_text(parts):
+    """{"client": "...", "me": "..."} -> текст с подписями говорящих."""
+    lines = [(label, parts.get(key, "").strip()) for key, label in SPEAKERS]
+    lines = [(label, text) for label, text in lines if text]
+    if len(lines) == 1 and lines[0][0] == "Клиент":
+        return lines[0][1]
+    return "\n".join("%s: %s" % line for line in lines)
+
+
+class Recorder:
+    """Запись звука в память (на диск ничего не пишется). Звук встречи берётся
+    с устройства вывода (WASAPI loopback), микрофон - с устройства ввода."""
+
+    def __init__(self, source):
+        try:
+            import numpy  # noqa: F401
+            import pyaudiowpatch as pa
+        except ImportError:
+            raise HintError(VOICE_INSTALL)
+        self.pa_mod = pa
+        self.pa = pa.PyAudio()
+        self.tracks = {}
+        try:
+            if source in ("system", "both"):
+                self._open("client", self._loopback_device(), None, None)
+            if source in ("mic", "both"):
+                info = self.pa.get_default_input_device_info()
+                try:
+                    self._open("me", info, 1, 16000)
+                except Exception:
+                    self._open("me", info, None, None)
+            if not self.tracks:
+                raise HintError("В config.json audio_source должен быть "
+                                "system, mic или both.")
+        except HintError:
+            self.pa.terminate()
+            raise
+        except Exception as e:
+            self.pa.terminate()
+            raise HintError("Не удалось начать запись звука: %s" % short(e, 150))
+
+    def _loopback_device(self):
+        if hasattr(self.pa, "get_default_wasapi_loopback"):
+            return self.pa.get_default_wasapi_loopback()
+        api = self.pa.get_host_api_info_by_type(self.pa_mod.paWASAPI)
+        out = self.pa.get_device_info_by_index(api["defaultOutputDevice"])
+        for dev in self.pa.get_loopback_device_info_generator():
+            if out["name"] in dev["name"]:
+                return dev
+        raise HintError("Не найдено устройство для записи звука встречи.")
+
+    def _open(self, name, info, channels, rate):
+        channels = channels or max(1, int(info["maxInputChannels"]))
+        rate = rate or int(info["defaultSampleRate"])
+        chunks = []
+
+        def callback(data, _frames, _time, _status):
+            chunks.append(data)
+            return (None, self.pa_mod.paContinue)
+
+        stream = self.pa.open(
+            format=self.pa_mod.paInt16, channels=channels, rate=rate, input=True,
+            input_device_index=int(info["index"]), frames_per_buffer=1024,
+            stream_callback=callback)
+        self.tracks[name] = (chunks, channels, rate, stream)
+
+    def stop(self):
+        """Останавливает запись, возвращает {"client": звук, "me": звук}."""
+        result = {}
+        for name, (chunks, channels, rate, stream) in self.tracks.items():
+            try:
+                stream.stop_stream()
+                stream.close()
+            except Exception:
+                pass
+            result[name] = to_mono16k(b"".join(chunks), channels, rate)
+        self.pa.terminate()
+        return result
+
+
+class Transcriber:
+    """Распознавание речи на этом компьютере (faster-whisper). Модель
+    скачивается один раз при первом использовании и остаётся в памяти."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.model = None
+        self.lock = threading.Lock()
+
+    def load(self):
+        with self.lock:
+            if self.model is None:
+                try:
+                    from faster_whisper import WhisperModel
+                except ImportError:
+                    raise HintError(VOICE_INSTALL)
+                try:
+                    self.model = WhisperModel(str(self.cfg["whisper_model"]),
+                                              device="cpu", compute_type="int8")
+                except Exception as e:
+                    raise HintError("Не удалось загрузить модель распознавания "
+                                    "речи: %s" % short(e, 200))
+
+    def transcribe(self, audio):
+        if audio is None or len(audio) < 16000 * 0.3:    # короче 0,3 с
+            return ""
+        self.load()
+
+        def run(vad):
+            segments, _info = self.model.transcribe(
+                audio, language=str(self.cfg["voice_language"]) or None,
+                initial_prompt=str(self.cfg["voice_hint"]) or None,
+                condition_on_previous_text=False, vad_filter=vad)
+            return " ".join(seg.text.strip() for seg in segments).strip()
+
+        try:
+            return run(True)       # с отсечением тишины
+        except Exception:
+            return run(False)
+
+
 # ------------------------------------------------------------- Windows API
 
 if IS_WIN:
@@ -459,8 +611,9 @@ if IS_WIN:
                         if kb.vkCode not in self._down:   # без автоповтора
                             self._down.add(kb.vkCode)
                             self.on_key(action, user32.GetForegroundWindow())
-                    else:
+                    elif kb.vkCode in self._down:
                         self._down.discard(kb.vkCode)
+                        self.on_key(action + "_up", user32.GetForegroundWindow())
                     return 1                              # нажатие "съедено"
             return user32.CallNextHookEx(None, code, wparam, lparam)
 
@@ -582,6 +735,8 @@ class App:
         self.history = deque(maxlen=max(0, int(cfg["history_pairs"])))
         self.last_sig = None
         self.last_answer = ""
+        self.voice = None                      # идущая запись звука
+        self.transcriber = Transcriber(cfg)
         self.hints = []                        # показанные подсказки, для листания
         self.hint_pos = -1
         self.steps = parse_steps(read_script())
@@ -614,7 +769,8 @@ class App:
 
         nav = tk.Frame(root, bg=BG)
         nav.pack(fill="x")
-        self._caption(nav, "Подсказка").pack(side="left", padx=(8, 0))
+        self.cap_lbl = self._caption(nav, "Подсказка")
+        self.cap_lbl.pack(side="left", padx=(8, 0))
         self._button(nav, "<", lambda: self.page_hint(-1), BG).pack(side="left")
         self.hint_lbl = self._caption(nav, "0/0")
         self.hint_lbl.pack(side="left")
@@ -641,14 +797,16 @@ class App:
             w.bind("<ButtonRelease-1>", self._drag_end)
 
         self.windows.append((root, True))
-        self.show("Готов.\n%s - снимок окна.\n%s - снимок с вопросом."
-                  % (cfg["key_capture"], cfg["key_ask"]))
+        self.show("Готов.\n%s - снимок окна.\n%s - снимок с вопросом.\n"
+                  "%s - держать: запись звука, отпустить: снимок и ответ."
+                  % (cfg["key_capture"], cfg["key_ask"], cfg["key_voice"]))
         self._reveal(root, no_activate=True)
 
         self.hook = None
         if IS_WIN:
             keymap = {parse_key(cfg["key_capture"]): "capture",
-                      parse_key(cfg["key_ask"]): "ask"}
+                      parse_key(cfg["key_ask"]): "ask",
+                      parse_key(cfg["key_voice"]): "voice"}
             self.hook = KeyHook(
                 keymap, lambda a, h: self.events.put(("key", a, h)),
                 cfg["hook_refresh_sec"])
@@ -812,6 +970,11 @@ class App:
                     self.on_key(event[1], event[2])
                 elif event[0] == "answer":
                     self.on_answer(*event[1:])
+                elif event[0] == "voice":
+                    self.busy = False
+                    self.start_request(event[1], "", speech=event[2])
+                elif event[0] == "status":
+                    self.show(event[1])
                 elif event[0] == "error":
                     self.busy = False
                     self.show(event[1])
@@ -821,20 +984,27 @@ class App:
 
     # --- клавиши и запрос
 
-    def on_key(self, action, hwnd):
-        if self.busy or self.dialog is not None:
-            return
+    def grab_shot(self, hwnd):
+        """Снимок активного окна или None."""
         if IS_WIN:
             if hwnd and not is_own_window(hwnd):
                 self.target_hwnd = hwnd
             try:
-                im = capture_window(self.target_hwnd, int(self.cfg["shot_width"]))
+                return capture_window(self.target_hwnd, int(self.cfg["shot_width"]))
             except Exception:
-                im = None
-        else:  # режим проверки интерфейса вне Windows
-            from PIL import Image
-            path = os.environ.get("HINT_TEST_IMAGE")
-            im = shrink(Image.open(path), int(self.cfg["shot_width"])) if path else None
+                return None
+        from PIL import Image          # режим проверки интерфейса вне Windows
+        path = os.environ.get("HINT_TEST_IMAGE")
+        return shrink(Image.open(path), int(self.cfg["shot_width"])) if path else None
+
+    def on_key(self, action, hwnd):
+        if action == "voice":
+            return self.voice_down(hwnd)
+        if action == "voice_up":
+            return self.voice_up(hwnd)
+        if action.endswith("_up") or self.busy or self.dialog or self.voice:
+            return
+        im = self.grab_shot(hwnd)
         if im is None:
             self.show("Не удалось снять окно. Сделайте окно подключения активным.")
             return
@@ -843,10 +1013,91 @@ class App:
         else:
             self.start_request(im, "")
 
-    def start_request(self, im, question):
-        """im=None - вопрос без снимка: по задаче и предыдущим шагам."""
+    # --- голосовая клавиша
+
+    def voice_down(self, hwnd):
+        if self.voice:                 # режим "нажал - говорят - нажал ещё раз"
+            if self.voice["toggle"]:
+                self.voice_finish(hwnd)
+            return
+        if self.busy or self.dialog is not None:
+            return
+        try:
+            if IS_WIN:
+                recorder = Recorder(str(self.cfg["audio_source"]))
+            else:                      # режим проверки интерфейса вне Windows
+                recorder = _TestRecorder()
+        except HintError as e:
+            self.show(str(e))
+            return
+        self.voice = {"rec": recorder, "t0": time.time(), "toggle": False}
+        self.cap_lbl.configure(text="● запись", fg="#ff6b6b")
+        threading.Thread(target=self._preload_voice, daemon=True).start()
+        voice = self.voice
+        self.root.after(int(float(self.cfg["voice_max_sec"]) * 1000),
+                        lambda: self.voice is voice and self.voice_finish(None))
+
+    def _preload_voice(self):
+        try:
+            self.transcriber.load()    # пока идёт запись, модель грузится в память
+        except Exception:
+            pass                       # об ошибке сообщит расшифровка
+
+    def voice_up(self, hwnd):
+        if not self.voice or self.voice["toggle"]:
+            return
+        if time.time() - self.voice["t0"] < 0.4:
+            # Клавиатура отпускает медиа-клавишу сама, сразу после нажатия:
+            # запись идёт до следующего нажатия.
+            self.voice["toggle"] = True
+            return
+        self.voice_finish(hwnd)
+
+    def voice_finish(self, hwnd):
+        voice, self.voice = self.voice, None
+        self.cap_lbl.configure(text="Подсказка", fg=DIM)
+        seconds = time.time() - voice["t0"]
+        try:
+            audio = voice["rec"].stop()
+        except Exception as e:
+            self.show("Сбой записи звука: %s" % type(e).__name__)
+            return
+        im = self.grab_shot(hwnd)
+        if im is None:
+            self.show("Не удалось снять окно. Сделайте окно подключения активным.")
+            return
+        self.busy = True
+        threading.Thread(target=self._voice_worker, args=(im, audio, seconds),
+                         daemon=True).start()
+
+    def _voice_worker(self, im, audio, seconds):
+        started = time.time()
+        try:
+            if self.transcriber.model is None:
+                self.events.put(("status", "Готовлю распознавание речи. В первый "
+                                 "раз скачивается модель, это несколько минут."))
+            parts = {name: self.transcriber.transcribe(track)
+                     for name, track in audio.items()}
+            logging.info("голос: запись %.1f с, расшифровка за %.1f с",
+                         seconds, time.time() - started)
+            speech = speech_text(parts)
+            if not speech:
+                self.events.put(("error", "Речь не распознана: в записи тишина. "
+                                 "Держите клавишу, пока говорят."))
+            else:
+                self.events.put(("voice", im, speech))
+        except HintError as e:
+            self.events.put(("error", str(e)))
+        except Exception as e:
+            logging.info("голос: сбой %s", type(e).__name__)
+            self.events.put(("error", "Сбой распознавания речи: %s"
+                             % type(e).__name__))
+
+    def start_request(self, im, question, speech=""):
+        """im=None - вопрос без снимка: по задаче и предыдущим шагам.
+        speech - расшифровка записи звука."""
         sig = signature(im) if im is not None else None
-        if (im is not None and not question and self.last_answer
+        if (im is not None and not question and not speech and self.last_answer
                 and same_shot(sig, self.last_sig, self.cfg["same_shot_threshold"])):
             logging.info("повтор снимка, запрос не отправлялся")
             if self.hints:
@@ -857,11 +1108,12 @@ class App:
         prompt = build_prompt(
             read_task(), list(self.history), question,
             step=self.current_step(), off_script=bool(self.cfg["off_script"]),
-            with_shot=im is not None)
-        threading.Thread(target=self._worker, args=(im, prompt, sig, question),
+            with_shot=im is not None, speech=speech)
+        threading.Thread(target=self._worker,
+                         args=(im, prompt, sig, question, speech),
                          daemon=True).start()
 
-    def _worker(self, im, prompt, sig, question):
+    def _worker(self, im, prompt, sig, question, speech):
         shot = self.workdir / SHOT_NAME
         started = time.time()
         kind = "запрос" if im is not None else "вопрос без снимка"
@@ -872,7 +1124,7 @@ class App:
             text = ask_claude(self.cfg, prompt, self.workdir, self.sysfile,
                               need_shot=im is not None)
             logging.info("%s: ответ за %.1f с", kind, time.time() - started)
-            self.events.put(("answer", text, sig, question))
+            self.events.put(("answer", text, sig, question, speech))
         except HintError as e:
             logging.info("%s: ошибка за %.1f с", kind, time.time() - started)
             self.events.put(("error", str(e)))
@@ -886,7 +1138,7 @@ class App:
             except OSError:
                 pass
 
-    def on_answer(self, text, sig, question):
+    def on_answer(self, text, sig, question, speech=""):
         self.busy = False
         advice, screen = parse_answer(text)
         advice = advice or text.strip()
@@ -897,7 +1149,10 @@ class App:
         if self.history.maxlen:
             self.history.append((short(screen or "не описан", 150),
                                  short(advice, 220)))
-        self.add_hint(advice)
+        if speech:
+            self.add_hint("Услышал: %s\n\n%s" % (short(speech, 400), advice))
+        else:
+            self.add_hint(advice)
 
     def new_session(self):
         self.history.clear()
@@ -1033,6 +1288,11 @@ class App:
     # --- выход
 
     def quit(self):
+        if self.voice:
+            try:
+                self.voice["rec"].stop()
+            except Exception:
+                pass
         if self.hook:
             self.hook.stop()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -1043,6 +1303,19 @@ class App:
             self.root.mainloop()
         finally:
             shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+
+class _TestRecorder:
+    """Вне Windows: вместо записи читает WAV из HINT_TEST_AUDIO (для проверки)."""
+
+    def stop(self):
+        import wave
+        path = os.environ.get("HINT_TEST_AUDIO")
+        if not path:
+            return {}
+        with wave.open(path, "rb") as w:
+            raw = w.readframes(w.getnframes())
+            return {"client": to_mono16k(raw, w.getnchannels(), w.getframerate())}
 
 
 # --------------------------------------------------------------- проверка
@@ -1075,9 +1348,9 @@ def check():
         line(False, "это не Windows: клавиши и снимки работать не будут")
     try:
         cfg = load_config()
-        codes = [parse_key(cfg["key_capture"]), parse_key(cfg["key_ask"])]
-        line(codes[0] != codes[1], "config.json: клавиши %s и %s, модель %s"
-             % (cfg["key_capture"], cfg["key_ask"], cfg["model"]))
+        codes = [parse_key(cfg[k]) for k in ("key_capture", "key_ask", "key_voice")]
+        line(len(set(codes)) == 3, "config.json: клавиши %s, %s, %s, модель %s"
+             % (cfg["key_capture"], cfg["key_ask"], cfg["key_voice"], cfg["model"]))
         exe = find_claude(cfg)
         line(True, "Claude Code: " + exe)
     except HintError as e:
@@ -1114,9 +1387,49 @@ def check():
         print("       Правила: %s" % " ".join(shot_rules(workdir)))
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+    check_voice(cfg, line)
     print("\nВсё готово, запускайте run.bat." if ok
           else "\nЕсть проблемы - см. строки с [ !! ].")
     return 0 if ok else 1
+
+
+def check_voice(cfg, line):
+    """Проверка голосовой клавиши. Она необязательна: без неё всё работает."""
+    try:
+        import numpy as np
+        import faster_whisper  # noqa: F401
+        if IS_WIN:
+            import pyaudiowpatch  # noqa: F401
+    except ImportError as e:
+        print("[ i  ] голосовая клавиша не установлена (%s). Чтобы включить: "
+              "python -m pip install -r requirements-voice.txt" % e.name)
+        return
+    print("Распознавание речи: загрузка модели %s (в первый раз скачивается, "
+          "несколько минут)..." % cfg["whisper_model"])
+    try:
+        started = time.time()
+        tr = Transcriber(cfg)
+        tr.load()
+        tr.transcribe(np.zeros(16000, dtype=np.float32))
+        line(True, "модель распознавания готова за %.1f с" % (time.time() - started))
+    except Exception as e:
+        line(False, "распознавание речи: %s" % short(e, 200))
+        return
+    if not IS_WIN:
+        return
+    try:
+        print("Запись звука 3 секунды (включите любое видео или музыку)...")
+        rec = Recorder(str(cfg["audio_source"]))
+        time.sleep(3)
+        for name, track in rec.stop().items():
+            peak = float(abs(track).max()) if len(track) else 0.0
+            print("       %s: записано %.1f с, уровень %.2f%s" % (
+                dict(SPEAKERS)[name], len(track) / 16000, peak,
+                "" if peak > 0.01 else " - тишина; если звук играл, пришлите "
+                "этот вывод разработчику"))
+        line(True, "запись звука работает (источник: %s)" % cfg["audio_source"])
+    except Exception as e:
+        line(False, "запись звука: %s" % short(e, 200))
 
 
 def main():
@@ -1131,8 +1444,8 @@ def main():
                 return 0
             set_dpi_aware()
         cfg = load_config()
-        parse_key(cfg["key_capture"])
-        parse_key(cfg["key_ask"])
+        for name in ("key_capture", "key_ask", "key_voice"):
+            parse_key(cfg[name])
         read_task()
         if not PROMPT_FILE.exists():
             raise HintError("Нет файла system_prompt.txt рядом с программой.")

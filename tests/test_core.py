@@ -125,6 +125,30 @@ class CoreTest(unittest.TestCase):
         self.assertIn("а что дальше?", p)
         self.assertNotIn("Прочитай его и ответь", p)
 
+    def test_prompt_with_speech(self):
+        p = hint.build_prompt("т", [], "", speech="не проводится документ")
+        self.assertIn("Расшифровка записи со встречи", p)
+        self.assertIn("не проводится документ", p)
+        self.assertIn("Прочитай его и ответь", p)
+
+    def test_speech_text(self):
+        self.assertEqual(hint.speech_text({"client": " привет ", "me": ""}), "привет")
+        self.assertEqual(hint.speech_text({"client": "а", "me": "б"}),
+                         "Клиент: а\nВнедренец: б")
+        self.assertEqual(hint.speech_text({"me": "б"}), "Внедренец: б")
+        self.assertEqual(hint.speech_text({"client": "", "me": ""}), "")
+
+    def test_to_mono16k(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy не установлен")
+        stereo = np.full((48000, 2), 8192, dtype=np.int16).tobytes()
+        mono = hint.to_mono16k(stereo, 2, 48000)
+        self.assertEqual(len(mono), 16000)
+        self.assertAlmostEqual(float(mono.mean()), 0.25, places=3)
+        self.assertEqual(len(hint.to_mono16k(b"", 2, 48000)), 0)
+
     def test_child_env_has_no_api_key(self):
         import os
         os.environ["ANTHROPIC_API_KEY"] = "x"
