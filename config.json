@@ -23,6 +23,7 @@
   "same_shot_threshold": 0.05,
   "hook_refresh_sec": 5,
   "claude_path": "",
+  "image_mode": "direct",
   "script_step": 1,
   "off_script": false
 }

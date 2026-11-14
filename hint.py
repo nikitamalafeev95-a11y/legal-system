@@ -6,7 +6,9 @@
 
 Запуск: run.bat. Проверка установки: check.bat (python hint.py --check).
 """
+import base64
 import ctypes
+import io
 import json
 import logging
 import os
@@ -53,6 +55,8 @@ DEFAULTS = {
     "same_shot_threshold": 0.05,      # допуск при сравнении снимков
     "hook_refresh_sec": 5,            # переустановка перехвата клавиш, 0 - выкл
     "claude_path": "",                # полный путь к claude, если не в PATH
+    "image_mode": "direct",           # direct - снимок прямо в запросе (дешевле),
+                                      # file - через файл и инструмент Read
     "script_step": 1,                 # текущий пункт скрипта (меняется кнопками)
     "off_script": False,              # режим "вне скрипта"
 }
@@ -75,6 +79,10 @@ VK_CODES.update({"f%d" % i: 0x70 + i - 1 for i in range(1, 25)})
 
 class HintError(Exception):
     """Ошибка с текстом, который можно показать пользователю."""
+
+
+class DirectUnsupported(HintError):
+    """Claude Code не принял снимок прямо в запросе: нужен режим file."""
 
 
 # ---------------------------------------------------------------- настройки
@@ -160,12 +168,21 @@ def read_knowledge():
     return KNOWLEDGE_FILE.read_text(encoding="utf-8-sig").strip()
 
 
-def build_system(instructions, script, knowledge=""):
+SHOT_RULES = {
+    "direct": "- Снимок экрана приложен к сообщению.",
+    "file": "- Снимок экрана лежит в файле %s в текущей папке. Сначала прочитай "
+            "его инструментом Read, других действий не выполняй." % "shot.png",
+}
+
+
+def build_system(instructions, script, knowledge="", mode="direct"):
     """Системная часть запроса: инструкция, справочник, скрипт встречи.
     Всё это между нажатиями не меняется, поэтому Claude Code берёт эту часть
     из кэша, а не обрабатывает заново. Порядок - от самого постоянного
     (инструкция, справочник) к тому, что меняется от клиента к клиенту."""
-    text = instructions.strip()
+    lines = [ln for ln in instructions.strip().splitlines()
+             if "shot.png" not in ln]          # правило из старого файла
+    text = "\n".join(lines) + "\n" + SHOT_RULES[mode]
     if knowledge:
         text += "\n\n" + knowledge
     if script:
@@ -174,10 +191,10 @@ def build_system(instructions, script, knowledge=""):
     return text + "\n"
 
 
-def write_system(path):
+def write_system(path, mode="direct"):
     Path(path).write_text(
         build_system(PROMPT_FILE.read_text(encoding="utf-8-sig"), read_script(),
-                     read_knowledge()),
+                     read_knowledge(), mode),
         encoding="utf-8")
 
 
@@ -190,7 +207,7 @@ def short(text, limit):
 
 
 def build_prompt(task, history, question, step=None, off_script=False,
-                 with_shot=True, speech=""):
+                 with_shot=True, speech="", direct=True):
     """Текст запроса. step - (номер, текст) текущего пункта скрипта."""
     parts = ["Задача клиента:\n" + (task or "(не заполнена)")]
     if off_script:
@@ -210,13 +227,16 @@ def build_prompt(task, history, question, step=None, off_script=False,
         parts.append("Расшифровка записи со встречи, сделанной только что "
                      "(распознано автоматически, возможны ошибки в словах):\n"
                      + speech + "\nПо сказанному и по снимку подскажи решение.")
-    if with_shot:
+    if with_shot and direct:
+        parts.append("Текущий экран - на приложенном снимке. Ответь.")
+    elif with_shot:
         parts.append("Текущий экран - файл %s в текущей папке. Прочитай его и "
                      "ответь." % SHOT_NAME)
     else:
-        parts.append("В этом запросе снимка нет: файл не читай, инструмент Read "
-                     "не вызывай. Ответь на вопрос по задаче и предыдущим шагам. "
-                     "Строку ЭКРАН не добавляй.")
+        parts.append("В этом запросе снимка нет%s. Ответь на вопрос по задаче и "
+                     "предыдущим шагам. Строку ЭКРАН не добавляй."
+                     % ("" if direct else ": файл не читай, инструмент Read не "
+                        "вызывай"))
     return "\n\n".join(parts)
 
 
@@ -280,22 +300,38 @@ def next_model(cfg):
     return models[0]
 
 
-def build_command(cfg, exe, workdir, sysfile):
-    """Команда headless-запуска. Модели доступно только чтение файла снимка:
-    единственный инструмент - Read, режим dontAsk запрещает читать что-либо
-    вне рабочей папки, а в рабочей папке лежит только снимок."""
-    return [
+def build_command(cfg, exe, workdir, sysfile, mode="direct"):
+    """Команда headless-запуска Claude Code.
+
+    direct: снимок идёт прямо в сообщении (stream-json), инструментов у модели
+    нет совсем, обращение к модели одно. Это дешевле и быстрее.
+    file: запасной способ. Единственный инструмент - Read, режим dontAsk
+    запрещает читать что-либо вне рабочей папки, а в ней лежит только снимок."""
+    cmd = [
         exe, "-p",
         "--model", str(cfg["model"]),
-        "--system-prompt-file", str(sysfile),  # заменяет стандартную инструкцию
-        "--tools", "Read",                        # других инструментов нет
-        "--allowedTools", *shot_rules(workdir),
-        "--permission-mode", "dontAsk",           # всё остальное запрещено
+        "--system-prompt-file", str(sysfile),     # заменяет стандартную инструкцию
+        "--permission-mode", "dontAsk",           # всё, что не разрешено, запрещено
         "--strict-mcp-config",                    # без MCP-серверов
         "--no-session-persistence",               # сессию на диск не писать
-        "--max-turns", "3",
-        "--output-format", "json",
     ]
+    if mode == "direct":
+        return cmd + ["--tools", "", "--max-turns", "1",
+                      "--input-format", "stream-json",
+                      "--output-format", "stream-json", "--verbose"]
+    return cmd + ["--tools", "Read", "--allowedTools", *shot_rules(workdir),
+                  "--max-turns", "3", "--output-format", "json"]
+
+
+def direct_message(prompt, png):
+    """Сообщение для режима direct: текст и, если есть, снимок в base64."""
+    content = [{"type": "text", "text": prompt}]
+    if png:
+        content.append({"type": "image", "source": {
+            "type": "base64", "media_type": "image/png",
+            "data": base64.b64encode(png).decode("ascii")}})
+    return json.dumps({"type": "user",
+                       "message": {"role": "user", "content": content}}) + "\n"
 
 
 def child_env():
@@ -306,36 +342,51 @@ def child_env():
     return env
 
 
-def ask_claude(cfg, prompt, workdir, sysfile, need_shot=True):
-    """Отправляет запрос, возвращает текст ответа. Снимок уже лежит в workdir,
-    системная часть - в файле sysfile (вне workdir)."""
+def ask_claude(cfg, prompt, workdir, sysfile, png=None, mode="direct"):
+    """Отправляет запрос, возвращает текст ответа. png - снимок (байты PNG) или
+    None. Системная часть лежит в файле sysfile (вне workdir)."""
     exe = find_claude(cfg)
+    shot = Path(workdir) / SHOT_NAME
     try:
+        if mode == "direct":
+            stdin = direct_message(prompt, png)
+        else:
+            stdin = prompt
+            if png:
+                shot.write_bytes(png)
         proc = subprocess.run(
-            build_command(cfg, exe, workdir, sysfile), input=prompt, capture_output=True,
-            encoding="utf-8", errors="replace", cwd=str(workdir),
-            env=child_env(), timeout=float(cfg["timeout_sec"]),
+            build_command(cfg, exe, workdir, sysfile, mode), input=stdin,
+            capture_output=True, encoding="utf-8", errors="replace",
+            cwd=str(workdir), env=child_env(), timeout=float(cfg["timeout_sec"]),
             creationflags=0x08000000 if IS_WIN else 0)  # CREATE_NO_WINDOW
     except subprocess.TimeoutExpired:
         raise HintError("Нет ответа за %s с. Нажмите клавишу ещё раз."
                         % cfg["timeout_sec"])
     except OSError as e:
         raise HintError("Не удалось запустить Claude Code: %s" % e)
+    finally:
+        try:
+            shot.unlink()          # снимок удаляется сразу после ответа
+        except OSError:
+            pass
 
     out = (proc.stdout or "").strip()
     data = None
-    for chunk in [out] + out.splitlines()[::-1]:
+    for chunk in out.splitlines()[::-1] + [out]:
         try:
             parsed = json.loads(chunk)
         except ValueError:
             continue
-        if isinstance(parsed, dict):
+        if isinstance(parsed, dict) and (parsed.get("type") == "result"
+                                         or "result" in parsed):
             data = parsed
             break
     if data is None:
-        msg = short(out or proc.stderr or "пустой ответ", 300)
+        msg = short(proc.stderr or out or "пустой ответ", 300)
+        if mode == "direct":
+            raise DirectUnsupported("Claude Code вернул ошибку: " + msg)
         raise HintError("Claude Code вернул ошибку: " + msg)
-    if need_shot and data.get("permission_denials"):
+    if mode == "file" and png and data.get("permission_denials"):
         raise HintError("Claude Code не смог прочитать снимок: доступ к файлу "
                         "отклонён. Сообщите разработчику.")
     result = str(data.get("result") or "").strip()
@@ -349,6 +400,26 @@ def ask_claude(cfg, prompt, workdir, sysfile, need_shot=True):
         raise HintError("Ошибка Claude Code: "
                         + short(result or data.get("subtype") or "нет ответа", 300))
     return result
+
+
+def ask(cfg, make_prompt, workdir, sysfile, png, mode):
+    """Запрос с запасным способом. make_prompt(direct) строит текст запроса.
+    Возвращает (ответ, режим, который сработал)."""
+    if mode == "direct":
+        try:
+            write_system(sysfile, "direct")
+            return ask_claude(cfg, make_prompt(True), workdir, sysfile, png,
+                              "direct"), "direct"
+        except DirectUnsupported:
+            logging.info("снимок в запросе не принят, перехожу на чтение файла")
+    write_system(sysfile, "file")
+    return ask_claude(cfg, make_prompt(False), workdir, sysfile, png, "file"), "file"
+
+
+def to_png(im):
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    return buf.getvalue()
 
 
 # --------------------------------------------------------------- снимки
@@ -757,9 +828,11 @@ class App:
         self.target_hwnd = None
         self.windows = []                      # окна, скрываемые от захвата
         self.tmpdir = make_workdir("hint_")
-        self.workdir = self.tmpdir / "shot"    # здесь лежит только снимок
+        self.workdir = self.tmpdir / "shot"    # рабочая папка Claude Code: пусто
+                                               # или только снимок (режим file)
         self.workdir.mkdir()
         self.sysfile = self.tmpdir / "system.txt"
+        self.image_mode = "file" if cfg["image_mode"] == "file" else "direct"
 
         self.root = root = tk.Tk()
         root.title("Подсказчик")
@@ -1117,24 +1190,25 @@ class App:
                 self._show_hint()
             return
         self.busy = True
-        prompt = build_prompt(
-            read_task(), list(self.history), question,
-            step=self.current_step(), off_script=bool(self.cfg["off_script"]),
-            with_shot=im is not None, speech=speech)
+        task, history = read_task(), list(self.history)
+        step, off = self.current_step(), bool(self.cfg["off_script"])
+
+        def make_prompt(direct):
+            return build_prompt(task, history, question, step=step,
+                                off_script=off, with_shot=im is not None,
+                                speech=speech, direct=direct)
+
         threading.Thread(target=self._worker,
-                         args=(im, prompt, sig, question, speech),
+                         args=(im, make_prompt, sig, question, speech),
                          daemon=True).start()
 
-    def _worker(self, im, prompt, sig, question, speech):
-        shot = self.workdir / SHOT_NAME
+    def _worker(self, im, make_prompt, sig, question, speech):
         started = time.time()
         kind = "запрос" if im is not None else "вопрос без снимка"
         try:
-            if im is not None:
-                im.save(shot, "PNG")
-            write_system(self.sysfile)
-            text = ask_claude(self.cfg, prompt, self.workdir, self.sysfile,
-                              need_shot=im is not None)
+            png = to_png(im) if im is not None else None
+            text, self.image_mode = ask(self.cfg, make_prompt, self.workdir,
+                                        self.sysfile, png, self.image_mode)
             logging.info("%s: ответ за %.1f с", kind, time.time() - started)
             self.events.put(("answer", text, sig, question, speech))
         except HintError as e:
@@ -1144,11 +1218,6 @@ class App:
             logging.info("%s: сбой %s за %.1f с",
                          kind, type(e).__name__, time.time() - started)
             self.events.put(("error", "Сбой программы: %s" % type(e).__name__))
-        finally:
-            try:
-                shot.unlink()      # снимок удаляется сразу после ответа
-            except OSError:
-                pass
 
     def on_answer(self, text, sig, question, speech=""):
         self.busy = False
@@ -1381,16 +1450,18 @@ def check():
     workdir = tmpdir / "shot"
     try:
         workdir.mkdir()
-        write_system(tmpdir / "system.txt")
         im = Image.new("RGB", (600, 200), "white")
         draw = ImageDraw.Draw(im)
         draw.rectangle((0, 0, 600, 30), fill=(255, 221, 85))
         draw.text((10, 9), "1C:Enterprise - test window", fill="black")
         draw.text((20, 80), "Error: period is closed.   [ OK ]", fill="black")
-        im.save(workdir / SHOT_NAME)
         started = time.time()
-        text = ask_claude(cfg, build_prompt(read_task(), [], ""), workdir,
-                          tmpdir / "system.txt")
+        text, mode = ask(
+            cfg, lambda direct: build_prompt(read_task(), [], "", direct=direct),
+            workdir, tmpdir / "system.txt", to_png(im), str(cfg["image_mode"]))
+        print("[ i  ] снимок передаётся: %s" % (
+            "прямо в запросе (дешёвый способ)" if mode == "direct"
+            else "через файл (запасной способ, дороже)"))
         advice, screen = parse_answer(text)
         line(bool(advice), "ответ получен за %.1f с" % (time.time() - started))
         print("       Подсказка: " + short(advice, 200))

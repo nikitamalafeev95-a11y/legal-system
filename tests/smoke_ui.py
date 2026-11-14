@@ -38,8 +38,8 @@ import hint  # noqa: E402
 prompts = []
 
 
-def fake_claude(cfg, prompt, workdir, sysfile, need_shot=True):
-    prompts.append((prompt, cfg["model"], (Path(workdir) / hint.SHOT_NAME).exists()))
+def fake_claude(cfg, prompt, workdir, sysfile, png=None, mode="direct"):
+    prompts.append((prompt, cfg["model"], bool(png)))
     return "Совет %d.\nЭКРАН: тестовый экран" % len(prompts)
 
 
@@ -69,8 +69,8 @@ def step1():
 
 def step2():
     check("снимок: ответ показан", app.label.cget("text") == "Совет 1.")
-    check("снимок удалён после ответа", not (app.workdir / hint.SHOT_NAME).exists())
-    check("снимок был в папке во время запроса", prompts[0][2])
+    check("на диске снимка нет", not list(app.workdir.iterdir()))
+    check("снимок передан в запросе", prompts[0][2])
     key("capture")
     root.after(300, step3)
 

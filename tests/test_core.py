@@ -36,7 +36,10 @@ class CoreTest(unittest.TestCase):
         self.assertIn("Клиент: Ромашка", p)
         self.assertIn("1. Экран: список. Совет: Откройте Банк", p)
         self.assertIn("где выписки?", p)
-        self.assertEqual(p.count(hint.SHOT_NAME), 1)
+        self.assertNotIn(hint.SHOT_NAME, p)
+        self.assertIn("приложенном снимке", p)
+        self.assertEqual(hint.build_prompt("т", [], "", direct=False)
+                         .count(hint.SHOT_NAME), 1)
 
     def test_short_is_one_line(self):
         s = hint.short("а\nб   в " * 100, 50)
@@ -66,17 +69,40 @@ class CoreTest(unittest.TestCase):
         with self.assertRaises(hint.HintError):
             hint.parse_key("нет такой")
 
-    def test_command_allows_only_reading_the_shot(self):
+    def test_direct_command_has_no_tools(self):
         cmd = hint.build_command(dict(hint.DEFAULTS), "claude", "/tmp/hint_x",
                                  "/tmp/sys.txt")
+        self.assertEqual(cmd[cmd.index("--tools") + 1], "")
+        self.assertEqual(cmd[cmd.index("--input-format") + 1], "stream-json")
+        self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "dontAsk")
+        self.assertEqual(cmd[cmd.index("--model") + 1], "haiku")
+        self.assertNotIn("--bare", cmd)
+        self.assertNotIn("--allowedTools", cmd)
+
+    def test_file_command_allows_only_reading_the_shot(self):
+        cmd = hint.build_command(dict(hint.DEFAULTS), "claude", "/tmp/hint_x",
+                                 "/tmp/sys.txt", "file")
         self.assertEqual(cmd[cmd.index("--tools") + 1], "Read")
         i = cmd.index("--allowedTools")
         self.assertEqual(cmd[i + 1:i + 3],
                          ["Read(./shot.png)", "Read(//tmp/hint_x/shot.png)"])
-        self.assertEqual(cmd[i + 3], "--permission-mode")
-        self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "dontAsk")
-        self.assertEqual(cmd[cmd.index("--model") + 1], "haiku")
-        self.assertNotIn("--bare", cmd)
+        self.assertEqual(cmd[i + 3], "--max-turns")
+
+    def test_direct_message(self):
+        import json
+        msg = json.loads(hint.direct_message("привет", b"\x89PNG"))
+        content = msg["message"]["content"]
+        self.assertEqual(content[0], {"type": "text", "text": "привет"})
+        self.assertEqual(content[1]["source"]["media_type"], "image/png")
+        self.assertEqual(len(json.loads(hint.direct_message("x", None))
+                             ["message"]["content"]), 1)
+
+    def test_system_part_shot_rule(self):
+        old = "Инструкция\n- Снимок экрана лежит в файле shot.png, читай Read."
+        direct = hint.build_system(old, "", "", "direct")
+        self.assertIn("приложен к сообщению", direct)
+        self.assertNotIn("shot.png", direct)
+        self.assertIn("shot.png", hint.build_system("Инструкция", "", "", "file"))
 
     def test_windows_rules_cover_only_the_shot(self):
         from pathlib import PureWindowsPath
@@ -86,9 +112,10 @@ class CoreTest(unittest.TestCase):
                                  "Read(//c/Users/Иван/Temp/hint_x/shot.png)"])
 
     def test_system_part_carries_script(self):
-        self.assertEqual(hint.build_system("Инструкция\n", ""), "Инструкция\n")
+        self.assertNotIn("Скрипт встречи", hint.build_system("Инструкция\n", ""))
         text = hint.build_system("Инструкция", "1. Проверить банк")
-        self.assertTrue(text.startswith("Инструкция\n\nСкрипт встречи"))
+        self.assertTrue(text.startswith("Инструкция\n"))
+        self.assertIn("Скрипт встречи", text)
         self.assertIn("1. Проверить банк", text)
 
     def test_model_cycle(self):
@@ -129,7 +156,7 @@ class CoreTest(unittest.TestCase):
         p = hint.build_prompt("т", [], "", speech="не проводится документ")
         self.assertIn("Расшифровка записи со встречи", p)
         self.assertIn("не проводится документ", p)
-        self.assertIn("Прочитай его и ответь", p)
+        self.assertIn("приложенном снимке", p)
 
     def test_speech_text(self):
         self.assertEqual(hint.speech_text({"client": " привет ", "me": ""}), "привет")
