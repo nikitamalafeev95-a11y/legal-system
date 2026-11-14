@@ -26,6 +26,7 @@ CONFIG_FILE = BASE / "config.json"
 TASK_FILE = BASE / "task.txt"
 PROMPT_FILE = BASE / "system_prompt.txt"
 SCRIPT_FILE = BASE / "script.txt"
+KNOWLEDGE_FILE = BASE / "knowledge.txt"
 LOG_FILE = BASE / "hint.log"
 IS_WIN = sys.platform == "win32"
 SHOT_NAME = "shot.png"
@@ -152,11 +153,21 @@ def parse_steps(script):
     return [(num, text) for num, text in steps]
 
 
-def build_system(instructions, script):
-    """Системная часть запроса: инструкция и, если есть, скрипт встречи.
-    Скрипт стоит здесь, а не в тексте запроса: эта часть между нажатиями не
-    меняется, поэтому Claude Code берёт её из кэша, а не обрабатывает заново."""
+def read_knowledge():
+    """Справочник внедренца: проверенные пути и типовые ошибки. Может не быть."""
+    if not KNOWLEDGE_FILE.exists():
+        return ""
+    return KNOWLEDGE_FILE.read_text(encoding="utf-8-sig").strip()
+
+
+def build_system(instructions, script, knowledge=""):
+    """Системная часть запроса: инструкция, справочник, скрипт встречи.
+    Всё это между нажатиями не меняется, поэтому Claude Code берёт эту часть
+    из кэша, а не обрабатывает заново. Порядок - от самого постоянного
+    (инструкция, справочник) к тому, что меняется от клиента к клиенту."""
     text = instructions.strip()
+    if knowledge:
+        text += "\n\n" + knowledge
     if script:
         text += ("\n\nСкрипт встречи и материалы по клиенту (справочно, не "
                  "пересказывай; текущий пункт указан в запросе):\n" + script)
@@ -165,7 +176,8 @@ def build_system(instructions, script):
 
 def write_system(path):
     Path(path).write_text(
-        build_system(PROMPT_FILE.read_text(encoding="utf-8-sig"), read_script()),
+        build_system(PROMPT_FILE.read_text(encoding="utf-8-sig"), read_script(),
+                     read_knowledge()),
         encoding="utf-8")
 
 
@@ -1357,6 +1369,8 @@ def check():
         line(False, str(e))
         return 1
     line(PROMPT_FILE.exists(), "system_prompt.txt на месте")
+    print("[ i  ] справочник knowledge.txt: %d знаков, скрипт script.txt: %d знаков"
+          % (len(read_knowledge()), len(read_script())))
     if os.environ.get("ANTHROPIC_API_KEY"):
         print("[ i  ] задана ANTHROPIC_API_KEY - программа её не использует, "
               "запросы идут по подписке")

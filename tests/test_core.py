@@ -149,6 +149,11 @@ class CoreTest(unittest.TestCase):
         self.assertAlmostEqual(float(mono.mean()), 0.25, places=3)
         self.assertEqual(len(hint.to_mono16k(b"", 2, 48000)), 0)
 
+    def test_system_part_order(self):
+        text = hint.build_system("Инструкция", "1. Пункт", "СПРАВОЧНИК")
+        self.assertLess(text.index("Инструкция"), text.index("СПРАВОЧНИК"))
+        self.assertLess(text.index("СПРАВОЧНИК"), text.index("1. Пункт"))
+
     def test_child_env_has_no_api_key(self):
         import os
         os.environ["ANTHROPIC_API_KEY"] = "x"
