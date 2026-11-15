@@ -44,6 +44,7 @@ DEFAULTS = {
     # Подсказка распознаванию речи: слова, которые звучат на встречах.
     # Распознавание учитывает только последние ~200 слов-частей, не раздувать.
     "voice_hint": "Разговор внедренца 1С с бухгалтером. Термины: 1С, БП, УТ, КА, ЗУП, УНФ, ERP, Розница, Фреш, ИТС, ИП, ООО, ИНН, КПП, ОГРН, НДС, НДФЛ, УСН, ЕНС, ЕНП, СФР, ФНС, РСВ, ЕФС-1, 6-НДФЛ, ОСВ, ЭДО, УПД, УКД, счёт-фактура, ТОРГ-12, СБИС, Диадок, Контур, МЧД, УКЭП, КриптоПро, ККТ, ОФД, РМК, эквайринг, ТСД, Клеверенс, Честный знак, код маркировки, GTIN, контрагент, номенклатура, проведение, закрытие месяца.",
+    "shot_width": 1300,               # ширина снимка, px
     "model": "haiku",                 # самая быстрая и дешёвая
     "models": ["haiku", "sonnet", "opus"],  # по кругу кнопкой в окне
     "history_pairs": 5,               # сколько пар "экран - совет" помнить
@@ -206,8 +207,15 @@ def short(text, limit):
     return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 
+SEARCH_NOTE = (
+    "Для этого запроса доступен поиск в интернете (WebSearch). Сделай ровно один "
+    "поисковый запрос по сути вопроса и сразу ответь по найденному, страницы не "
+    "открывай. В ответе назови источник (сайт) и на какую дату данные. Чего в "
+    "поиске не нашлось, помечай \"по памяти, проверьте\".")
+
+
 def build_prompt(task, history, question, step=None, off_script=False,
-                 with_shot=True, speech="", direct=True):
+                 with_shot=True, speech="", direct=True, search=False):
     """Текст запроса. step - (номер, текст) текущего пункта скрипта."""
     parts = ["Задача клиента:\n" + (task or "(не заполнена)")]
     if off_script:
@@ -227,6 +235,8 @@ def build_prompt(task, history, question, step=None, off_script=False,
         parts.append("Расшифровка записи со встречи, сделанной только что "
                      "(распознано автоматически, возможны ошибки в словах):\n"
                      + speech + "\nПо сказанному и по снимку подскажи решение.")
+    if search:
+        parts.append(SEARCH_NOTE)
     if with_shot and direct:
         parts.append("Текущий экран - на приложенном снимке. Ответь.")
     elif with_shot:
@@ -300,13 +310,15 @@ def next_model(cfg):
     return models[0]
 
 
-def build_command(cfg, exe, workdir, sysfile, mode="direct"):
+def build_command(cfg, exe, workdir, sysfile, mode="direct", search=False):
     """Команда headless-запуска Claude Code.
 
     direct: снимок идёт прямо в сообщении (stream-json), инструментов у модели
     нет совсем, обращение к модели одно. Это дешевле и быстрее.
     file: запасной способ. Единственный инструмент - Read, режим dontAsk
-    запрещает читать что-либо вне рабочей папки, а в ней лежит только снимок."""
+    запрещает читать что-либо вне рабочей папки, а в ней лежит только снимок.
+    search: разовый режим с поиском в интернете - добавляется инструмент
+    WebSearch (один поиск и ответ). Дольше и дороже, включается кнопкой."""
     cmd = [
         exe, "-p",
         "--model", str(cfg["model"]),
@@ -316,9 +328,15 @@ def build_command(cfg, exe, workdir, sysfile, mode="direct"):
         "--no-session-persistence",               # сессию на диск не писать
     ]
     if mode == "direct":
-        return cmd + ["--tools", "", "--max-turns", "1",
-                      "--input-format", "stream-json",
-                      "--output-format", "stream-json", "--verbose"]
+        tools = (["--tools", "WebSearch", "--allowedTools", "WebSearch",
+                  "--max-turns", "3"] if search
+                 else ["--tools", "", "--max-turns", "1"])
+        return cmd + tools + ["--input-format", "stream-json",
+                              "--output-format", "stream-json", "--verbose"]
+    if search:
+        return cmd + ["--tools", "Read,WebSearch", "--allowedTools",
+                      *shot_rules(workdir), "WebSearch",
+                      "--max-turns", "5", "--output-format", "json"]
     return cmd + ["--tools", "Read", "--allowedTools", *shot_rules(workdir),
                   "--max-turns", "3", "--output-format", "json"]
 
@@ -342,7 +360,8 @@ def child_env():
     return env
 
 
-def ask_claude(cfg, prompt, workdir, sysfile, png=None, mode="direct"):
+def ask_claude(cfg, prompt, workdir, sysfile, png=None, mode="direct",
+               search=False):
     """Отправляет запрос, возвращает текст ответа. png - снимок (байты PNG) или
     None. Системная часть лежит в файле sysfile (вне workdir)."""
     exe = find_claude(cfg)
@@ -355,7 +374,7 @@ def ask_claude(cfg, prompt, workdir, sysfile, png=None, mode="direct"):
             if png:
                 shot.write_bytes(png)
         proc = subprocess.run(
-            build_command(cfg, exe, workdir, sysfile, mode), input=stdin,
+            build_command(cfg, exe, workdir, sysfile, mode, search), input=stdin,
             capture_output=True, encoding="utf-8", errors="replace",
             cwd=str(workdir), env=child_env(), timeout=float(cfg["timeout_sec"]),
             creationflags=0x08000000 if IS_WIN else 0)  # CREATE_NO_WINDOW
@@ -402,18 +421,19 @@ def ask_claude(cfg, prompt, workdir, sysfile, png=None, mode="direct"):
     return result
 
 
-def ask(cfg, make_prompt, workdir, sysfile, png, mode):
+def ask(cfg, make_prompt, workdir, sysfile, png, mode, search=False):
     """Запрос с запасным способом. make_prompt(direct) строит текст запроса.
     Возвращает (ответ, режим, который сработал)."""
     if mode == "direct":
         try:
             write_system(sysfile, "direct")
             return ask_claude(cfg, make_prompt(True), workdir, sysfile, png,
-                              "direct"), "direct"
+                              "direct", search), "direct"
         except DirectUnsupported:
             logging.info("снимок в запросе не принят, перехожу на чтение файла")
     write_system(sysfile, "file")
-    return ask_claude(cfg, make_prompt(False), workdir, sysfile, png, "file"), "file"
+    return ask_claude(cfg, make_prompt(False), workdir, sysfile, png, "file",
+                      search), "file"
 
 
 def to_png(im):
@@ -819,6 +839,7 @@ class App:
         self.last_sig = None
         self.last_answer = ""
         self.voice = None                      # идущая запись звука
+        self.search_once = False               # следующий запрос - с поиском
         self.transcriber = Transcriber(cfg)
         self.hints = []                        # показанные подсказки, для листания
         self.hint_pos = -1
@@ -860,6 +881,8 @@ class App:
         self.hint_lbl = self._caption(nav, "0/0")
         self.hint_lbl.pack(side="left")
         self._button(nav, ">", lambda: self.page_hint(1), BG).pack(side="left")
+        self.search_btn = self._button(nav, "Поиск", self.toggle_search, BG)
+        self.search_btn.pack(side="left", padx=(6, 0))
         self.step_box = tk.Frame(nav, bg=BG)   # виден, когда в скрипте есть пункты
         self.off_btn = self._button(self.step_box, "Вне скрипта",
                                     self.toggle_off_script, BG)
@@ -950,6 +973,13 @@ class App:
         save_config(self.cfg)
         self.model_btn.configure(text=self.cfg["model"])
         self.last_sig = None
+
+    def toggle_search(self):
+        """Следующий запрос уйдёт с поиском в интернете (дольше и дороже),
+        после него режим выключается сам."""
+        self.search_once = not self.search_once
+        self.search_btn.configure(fg="#ffb454" if self.search_once else DIM)
+        self.last_sig = None           # тот же экран можно отправить с поиском
 
     # --- листание подсказок
 
@@ -1192,23 +1222,29 @@ class App:
         self.busy = True
         task, history = read_task(), list(self.history)
         step, off = self.current_step(), bool(self.cfg["off_script"])
+        search = self.search_once
+        if search:                     # режим разовый
+            self.toggle_search()
 
         def make_prompt(direct):
             return build_prompt(task, history, question, step=step,
                                 off_script=off, with_shot=im is not None,
-                                speech=speech, direct=direct)
+                                speech=speech, direct=direct, search=search)
 
         threading.Thread(target=self._worker,
-                         args=(im, make_prompt, sig, question, speech),
+                         args=(im, make_prompt, sig, question, speech, search),
                          daemon=True).start()
 
-    def _worker(self, im, make_prompt, sig, question, speech):
+    def _worker(self, im, make_prompt, sig, question, speech, search=False):
         started = time.time()
         kind = "запрос" if im is not None else "вопрос без снимка"
+        if search:
+            kind += " с поиском"
         try:
             png = to_png(im) if im is not None else None
             text, self.image_mode = ask(self.cfg, make_prompt, self.workdir,
-                                        self.sysfile, png, self.image_mode)
+                                        self.sysfile, png, self.image_mode,
+                                        search)
             logging.info("%s: ответ за %.1f с", kind, time.time() - started)
             self.events.put(("answer", text, sig, question, speech))
         except HintError as e:

@@ -6,7 +6,7 @@
 Программа копируется во временную папку, ответы Claude и распознавание речи
 подменяются заглушками. Проверяются: снимок, повтор снимка, вопрос со снимком
 и без, пункты скрипта, "Вне скрипта", листание подсказок, смена модели,
-голосовая клавиша (удержание и короткое нажатие), "Новая сессия".
+голосовая клавиша (удержание и короткое нажатие), разовый поиск, "Новая сессия".
 Перехват клавиш, снимок окна, запись звука и скрытие от захвата здесь НЕ
 проверяются: это работает только на Windows.
 """
@@ -38,8 +38,9 @@ import hint  # noqa: E402
 prompts = []
 
 
-def fake_claude(cfg, prompt, workdir, sysfile, png=None, mode="direct"):
-    prompts.append((prompt, cfg["model"], bool(png)))
+def fake_claude(cfg, prompt, workdir, sysfile, png=None, mode="direct",
+                search=False):
+    prompts.append((prompt, cfg["model"], bool(png), search))
     return "Совет %d.\nЭКРАН: тестовый экран" % len(prompts)
 
 
@@ -136,6 +137,20 @@ def step10():
 
 def step11():
     check("второе нажатие останавливает запись", app.voice is None and len(prompts) == 7)
+    app.search_btn.invoke()
+    key("capture")
+    root.after(200, lambda: idle(step12))
+
+
+def step12():
+    check("поиск: тот же экран ушёл с поиском", len(prompts) == 8 and prompts[7][3])
+    check("поиск выключился сам", not app.search_once)
+    key("capture")
+    root.after(300, step13)
+
+
+def step13():
+    check("после поиска повтор снимка не отправляется", len(prompts) == 8)
     app.new_session()
     check("новая сессия", not app.hints and not app.history and app.cfg["script_step"] == 1)
     folder = app.tmpdir
@@ -143,6 +158,13 @@ def step11():
     check("временная папка удалена", not folder.exists())
 
 
+def watchdog():
+    # Ошибка внутри шага обрывает цепочку, и окно ждало бы вечно.
+    check("сценарий дошёл до конца за 40 секунд", False)
+    root.destroy()
+
+
+root.after(40000, watchdog)
 root.after(500, step1)
 app.run()
 shutil.rmtree(tmp, ignore_errors=True)
@@ -150,4 +172,4 @@ for name, ok in checks:
     print(("[ OK ] " if ok else "[ !! ] ") + name)
 failed = [name for name, ok in checks if not ok]
 print("\nПроверок: %d, ошибок: %d" % (len(checks), len(failed)))
-sys.exit(1 if failed or len(checks) < 17 else 0)
+sys.exit(1 if failed or len(checks) < 20 else 0)

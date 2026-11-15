@@ -88,6 +88,17 @@ class CoreTest(unittest.TestCase):
                          ["Read(./shot.png)", "Read(//tmp/hint_x/shot.png)"])
         self.assertEqual(cmd[i + 3], "--max-turns")
 
+    def test_search_command_and_prompt(self):
+        cmd = hint.build_command(dict(hint.DEFAULTS), "claude", "/tmp/hint_x",
+                                 "/tmp/sys.txt", "direct", search=True)
+        self.assertEqual(cmd[cmd.index("--tools") + 1], "WebSearch")
+        self.assertEqual(cmd[cmd.index("--allowedTools") + 1], "WebSearch")
+        cmd = hint.build_command(dict(hint.DEFAULTS), "claude", "/tmp/hint_x",
+                                 "/tmp/sys.txt", "file", search=True)
+        self.assertEqual(cmd[cmd.index("--tools") + 1], "Read,WebSearch")
+        self.assertIn("WebSearch", hint.build_prompt("т", [], "вопрос", search=True))
+        self.assertNotIn("WebSearch", hint.build_prompt("т", [], "вопрос"))
+
     def test_direct_message(self):
         import json
         msg = json.loads(hint.direct_message("привет", b"\x89PNG"))
@@ -180,6 +191,17 @@ class CoreTest(unittest.TestCase):
         text = hint.build_system("Инструкция", "1. Пункт", "СПРАВОЧНИК")
         self.assertLess(text.index("Инструкция"), text.index("СПРАВОЧНИК"))
         self.assertLess(text.index("СПРАВОЧНИК"), text.index("1. Пункт"))
+
+    def test_shipped_config_matches_defaults(self):
+        """Каждая настройка из config.json известна программе и наоборот:
+        потерянный ключ в DEFAULTS молча выбрасывается при загрузке."""
+        import json
+        shipped = json.loads((Path(hint.__file__).parent / "config.json")
+                             .read_text(encoding="utf-8"))
+        self.assertEqual(set(shipped), set(hint.DEFAULTS))
+        for key in ("shot_width", "model", "history_pairs", "key_capture",
+                    "key_ask", "key_voice", "timeout_sec"):
+            self.assertIn(key, hint.DEFAULTS)
 
     def test_child_env_has_no_api_key(self):
         import os
